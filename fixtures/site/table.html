@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>Fixture 加油记录表</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; }
+    table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+    th, td { border: 1px solid #ccc; padding: 0.4rem 0.6rem; text-align: left; }
+    th { background: #f5f5f5; }
+    .toolbar input { margin-right: 0.5rem; }
+    button { margin-right: 0.5rem; padding: 0.35rem 0.8rem; }
+  </style>
+</head>
+<body>
+  <h1>加油记录</h1>
+  <div class="toolbar">
+    <label>开始时间 <input id="start" type="text" value="2026-01-01" /></label>
+    <label>结束时间 <input id="end" type="text" value="2026-11-06" /></label>
+    <button id="queryBtn" type="button">查询</button>
+    <button id="exportBtn" type="button">导出</button>
+  </div>
+  <table id="data">
+    <thead>
+      <tr>
+        <th>车牌</th>
+        <th>加油量(L)</th>
+        <th>金额(元)</th>
+        <th>站点</th>
+        <th>时间</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>粤A12345</td><td>42.5</td><td>320.00</td><td>南山站</td><td>2026-03-01 09:12</td></tr>
+      <tr><td>粤B67890</td><td>38.0</td><td>286.50</td><td>宝安站</td><td>2026-04-12 14:20</td></tr>
+      <tr><td>粤C11111</td><td>50.2</td><td>401.60</td><td>福田站</td><td>2026-05-08 11:05</td></tr>
+    </tbody>
+  </table>
+  <p id="status">共 3 条</p>
+</body>
+</html>

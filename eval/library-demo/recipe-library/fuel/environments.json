@@ -1,0 +1,8 @@
+{
+  "fixture": {
+    "base_url": "http://127.0.0.1:8765"
+  },
+  "mes-test": {
+    "base_url": "https://mes-test.example.invalid"
+  }
+}

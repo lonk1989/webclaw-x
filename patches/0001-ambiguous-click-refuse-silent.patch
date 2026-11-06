@@ -1,0 +1,69 @@
+diff --git a/runtime/src/commands/scripts.rs b/runtime/src/commands/scripts.rs
+--- a/runtime/src/commands/scripts.rs
++++ b/runtime/src/commands/scripts.rs
+@@ -45,7 +45,8 @@ pub fn parse_click_text_args(args: &str) -> Option<(String, u32)> {
+     if raw.is_empty() || is_structural_target(raw) {
+         return None;
+     }
+-    let mut match_index = 1u32;
++    // 0 = must be unique (no silent first-match). Explicit #N sets >= 1. (webclaw-x P0)
++    let mut match_index = 0u32;
+     let mut query = raw.to_string();
+     if let Some(hash_pos) = query.rfind('#') {
+
+diff --git a/runtime/src/commands/frame_eval.rs b/runtime/src/commands/frame_eval.rs
+--- a/runtime/src/commands/frame_eval.rs
++++ b/runtime/src/commands/frame_eval.rs
+@@ -597,6 +597,35 @@ async fn locate_global_click_text_once(
+     let total = entries.len() as u32;
+     entries.sort_by(cmp_click_text_catalog);
++    // webclaw-x P0: global_index==0 means must be unique — refuse silent first-match
++    if global_index == 0 {
++        if entries.is_empty() {
++            return Err(format!("未找到「{query}」（跨 frame 共 0 个足够匹配）"));
++        }
++        if entries.len() > 1 {
++            let preview: Vec<String> = entries
++                .iter()
++                .take(8)
++                .enumerate()
++                .map(|(i, h)| format!("#{} target={}", i + 1, h.target_id))
++                .collect();
++            return Err(format!(
++                "AMBIGUOUS_TARGET:「{query}」匹配到 {total} 个候选，请加 #序号（例如 点击{query}#1）。候选：{}",
++                preview.join("；")
++            ));
++        }
++        let hit = &entries[0];
++        return Ok(StructuralLocalHit {
++            local_index: hit.local_index,
++            target_id: hit.target_id.clone(),
++            context_id: hit.context_id,
++            is_parent: hit.is_parent,
++        });
++    }
+     if global_index < 1 || global_index as usize > entries.len() {
+         return Err(format!(
+             "未找到「{query}」#{global_index}（跨 frame 共 {total} 个足够匹配）"
+@@ -621,9 +650,7 @@ pub async fn locate_global_click_text_with_hot(
+     hot: &FrameHotPath,
+     cancel: Option<&AtomicBool>,
+ ) -> Result<StructuralLocalHit, String> {
+-    if global_index < 1 {
+-        return Err("点击文字序号从 1 开始".into());
+-    }
++    // index 0 = must be unique (webclaw-x P0); explicit #N is >= 1
+     if cancelled(cancel) {
+         return Err("已取消".into());
+     }
+@@ -637,6 +664,10 @@ pub async fn locate_global_click_text_with_hot(
+         match locate_global_click_text_once(parent, query, global_index, hot).await {
+             Ok(hit) => return Ok(hit),
+             Err(e) => {
++                // Ambiguity is deterministic — do not poll away the conflict.
++                if e.contains("AMBIGUOUS_TARGET") {
++                    return Err(e);
++                }
+                 last_err = e;
+                 if Instant::now() >= deadline {
+                     break;

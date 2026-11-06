@@ -1,0 +1,704 @@
+--- a/webclaw-oss/runtime/src/executor.rs
++++ b/webclaw-oss/runtime/src/executor.rs
+@@ -1353,6 +1353,9 @@
+             }
+ 
+             let err = result.as_ref().err().cloned().unwrap_or_default();
++            if crate::self_heal::terminal_error(&err) {
++                break; // Never let legacy AI/recovery guess past policy/ambiguity/repair boundaries.
++            }
+             let class = ai_repair::classify_error(&err);
+             if class == ErrorClass::Cancelled {
+                 result = Err("已取消".into());
+@@ -3336,6 +3339,78 @@
+ }
+ 
+ async fn execute_step<R: Runtime>(
++    app: &AppHandle<R>, state: &crate::AppState, task_id: &str, control: &TaskControl,
++    mut client: Option<&mut CdpClient>, step: &Step, session: Option<&Arc<RunSession>>,
++    step_index: Option<u32>, cancel: Option<&Arc<std::sync::atomic::AtomicBool>>,
++    focus_ctx: &mut commands::FocusContext,
++) -> Result<String, String> {
++    let config = crate::self_heal::HealConfig::load()?;
++    let mut result = execute_step_once(app, state, task_id, control, client.as_deref_mut(),
++        step, session, step_index, cancel, focus_ctx).await;
++    if result.is_ok() || !config.enabled || step.is_or_try() || step.keyword == "断言" {
++        return result;
++    }
++    let error = result.as_ref().err().cloned().unwrap_or_default();
++    if crate::self_heal::terminal_error(&error) { return result; }
++    if !crate::self_heal::retryable(&step.keyword, &error) || client.is_none() {
++        crate::self_heal::trace(step_index, "need_repair_unsafe_or_nontransient", 0, &config);
++        return Err("NEED_REPAIR: automatic retries require a transient read-only step".into());
++    }
++    // Stage 1: same exact step; previous recipe steps are never replayed.
++    for attempt in 1..=config.short_retries {
++        if control.cancel.load(Ordering::SeqCst) { return Err("已取消".into()); }
++        crate::self_heal::trace(step_index, "short_retry", attempt, &config);
++        tokio::time::sleep(Duration::from_millis(config.retry_interval_ms)).await;
++        result = execute_step_once(app, state, task_id, control, client.as_deref_mut(),
++            step, session, step_index, cancel, focus_ctx).await;
++        if result.is_ok() { return result; }
++        if crate::self_heal::terminal_error(result.as_ref().err().unwrap()) { return result; }
++    }
++    // Stage 2: refresh is explicitly opt-in (refresh may otherwise resubmit forms).
++    if config.refresh {
++        let c = client.as_deref_mut().unwrap();
++        let _ = c.sync_page_meta().await;
++        crate::navigation_policy::check_navigation(&c.target_url)?;
++        crate::self_heal::trace(step_index, "refresh", 1, &config);
++        c.reload(false).await.map_err(|_| "NEED_REPAIR: refresh failed".to_string())?;
++        result = execute_step_once(app, state, task_id, control, client.as_deref_mut(),
++            step, session, step_index, cancel, focus_ctx).await;
++        if result.is_ok() { return result; }
++        if crate::self_heal::terminal_error(result.as_ref().err().unwrap()) { return result; }
++    }
++    // Stage 3: no inferred #1. A structural wait fallback must be explicitly mapped.
++    let key = format!("{} {}", step.keyword, step.args.trim());
++    if step.keyword == "等待" {
++        if let Some(anchor) = config.structural_anchors.get(&key) {
++            crate::self_heal::trace(step_index, "structural_fallback", 1, &config);
++            let mut fallback = step.clone();
++            fallback.args = if anchor.split_whitespace().count() == 1 {
++                format!("{} 1", anchor) // Bounded default; structural wait parser needs >= 1s.
++            } else { anchor.clone() };
++            result = execute_step_once(app, state, task_id, control, client.as_deref_mut(),
++                &fallback, session, step_index, cancel, focus_ctx).await;
++            if result.is_ok() { return result; }
++            if crate::self_heal::terminal_error(result.as_ref().err().unwrap()) { return result; }
++        }
++    }
++    crate::self_heal::trace(step_index, "need_repair", 0, &config);
++    // Stage 4: real FileHumanBridge; an acknowledgement alone is not step success.
++    if config.hitl {
++        crate::self_heal::trace(step_index, "hitl", 1, &config);
++        let human = Step::new("人机验证", format!("{} 自愈需要人工修复当前页面；完成后确认，再验证原步骤", config.hitl_timeout_secs));
++        execute_step_once(app, state, task_id, control, client.as_deref_mut(),
++            &human, session, step_index, cancel, focus_ctx).await?;
++        result = execute_step_once(app, state, task_id, control, client.as_deref_mut(),
++            step, session, step_index, cancel, focus_ctx).await;
++        if result.is_ok() { return result; }
++        if crate::self_heal::terminal_error(result.as_ref().err().unwrap()) { return result; }
++    }
++    // Stage 5: bounded future proposal interface only. Never calls a model.
++    crate::self_heal::trace(step_index, "ai_hook_unimplemented", 0, &config);
++    Err("NEED_REPAIR: deterministic ladder exhausted; no automatic AI patch was applied".into())
++}
++
++async fn execute_step_once<R: Runtime>(
+     app: &AppHandle<R>,
+     state: &crate::AppState,
+     task_id: &str,
+--- a/webclaw-oss/runtime/src/lib.rs
++++ b/webclaw-oss/runtime/src/lib.rs
+@@ -23,6 +23,7 @@
+ mod file_assoc;
+ mod human_bridge;
+ mod navigation_policy;
++mod self_heal;
+ #[cfg(feature = "desktop")]
+ mod launch;
+ mod login_verify;
+--- /dev/null
++++ b/webclaw-oss/runtime/src/self_heal.rs
+@@ -0,0 +1,111 @@
++//! Bounded deterministic self-heal policy. No LLM calls; no recipe replay.
++use serde::{Deserialize, Serialize};
++use std::collections::HashMap;
++use std::path::PathBuf;
++
++#[derive(Clone, Debug, Deserialize, Serialize)]
++#[serde(default, deny_unknown_fields)]
++pub struct HealConfig {
++    pub enabled: bool,
++    pub short_retries: u32,
++    pub retry_interval_ms: u64,
++    pub refresh: bool,
++    pub structural_anchors: HashMap<String, String>,
++    pub hitl: bool,
++    pub hitl_timeout_secs: u32,
++    pub ai_hook_budget: u32,
++}
++impl Default for HealConfig {
++    fn default() -> Self {
++        Self { enabled: false, short_retries: 1, retry_interval_ms: 100,
++               refresh: false, structural_anchors: HashMap::new(), hitl: false,
++               hitl_timeout_secs: 60, ai_hook_budget: 0 }
++    }
++}
++impl HealConfig {
++    fn validate(&self) -> Result<(), String> {
++        if self.short_retries > 3 || self.retry_interval_ms > 2000
++            || !(10..=300).contains(&self.hitl_timeout_secs) || self.ai_hook_budget > 1
++            || self.structural_anchors.len() > 100 {
++            return Err("HEAL_CONFIG_INVALID: retry/delay/HITL/AI budgets out of bounds".into());
++        }
++        for (step, anchor) in &self.structural_anchors {
++            if !step.starts_with("等待 ") || !valid_structural_anchor(anchor) {
++                return Err("HEAL_CONFIG_INVALID: only explicit structural wait anchors are allowed".into());
++            }
++        }
++        Ok(())
++    }
++    pub fn load() -> Result<Self, String> {
++        if std::env::var("WEBCLAW_HEAL_ENABLED").as_deref() == Ok("0") { return Ok(Self::default()); }
++        let explicit = std::env::var_os("WEBCLAW_HEAL_FILE");
++        let path = explicit.as_ref().map(PathBuf::from)
++            .unwrap_or_else(|| crate::paths::app_data_dir().join("heal.json"));
++        let mut config: Self = match std::fs::read_to_string(path) {
++            Ok(raw) => serde_json::from_str(&raw).map_err(|_| "HEAL_CONFIG_INVALID: invalid heal.json")?,
++            Err(e) if e.kind() == std::io::ErrorKind::NotFound && explicit.is_none() => Self::default(),
++            Err(_) => return Err("HEAL_CONFIG_INVALID: cannot read heal file".into()),
++        };
++        if std::env::var("WEBCLAW_HEAL_ENABLED").as_deref() == Ok("1") { config.enabled = true; }
++        config.validate()?;
++        Ok(config)
++    }
++}
++
++pub fn valid_structural_anchor(anchor: &str) -> bool {
++    let re = regex::Regex::new(r"^(按钮|输入框|链接)#[1-9][0-9]{0,3}(?:\s+([0-9]+(?:\.[0-9]+)?))?$").unwrap();
++    match re.captures(anchor) {
++        Some(c) => c.get(2).map(|v| v.as_str().parse::<f64>().map(|s| (1.0..=5.0).contains(&s)).unwrap_or(false)).unwrap_or(true),
++        None => false,
++    }
++}
++
++pub fn terminal_error(err: &str) -> bool {
++    ["POLICY_DENIED", "AMBIGUOUS_TARGET", "已取消", "已停止", "NEED_HUMAN", "HEAL_CONFIG_INVALID", "NEED_REPAIR"]
++        .iter().any(|s| err.contains(s))
++}
++
++pub fn retryable(keyword: &str, err: &str) -> bool {
++    if terminal_error(err) { return false; }
++    matches!(keyword, "等待" | "采集")
++        && ["未找到", "超时", "未命中", "失败", "CDP", "不存在", "采集"].iter().any(|s| err.contains(s))
++}
++
++pub fn trace(step_index: Option<u32>, stage: &str, attempt: u32, config: &HealConfig) {
++    crate::run_sink::emit_log(format!("SELF_HEAL {}", serde_json::json!({
++        "step_index": step_index, "stage": stage, "attempt": attempt,
++        "ai_hook": {"budget": config.ai_hook_budget, "used": 0, "implemented": false}
++    })));
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn defaults_are_disabled_and_budgets_capped() {
++        let mut c = HealConfig::default();
++        assert!(!c.enabled && !c.refresh && !c.hitl);
++        assert!(c.validate().is_ok());
++        c.short_retries = 4; assert!(c.validate().is_err());
++        c.short_retries = 1; c.ai_hook_budget = 2; assert!(c.validate().is_err());
++    }
++    #[test]
++    fn no_action_or_terminal_error_retries() {
++        assert!(retryable("等待", "等待超时：未找到"));
++        assert!(retryable("采集", "CDP 失败"));
++        for kw in ["点击", "输入", "登录", "上传", "选择下拉", "断言"] {
++            assert!(!retryable(kw, "未找到"));
++        }
++        for e in ["POLICY_DENIED", "AMBIGUOUS_TARGET", "已取消", "NEED_REPAIR"] {
++            assert!(!retryable("等待", e));
++        }
++    }
++    #[test]
++    fn only_explicit_bounded_structural_waits() {
++        assert!(valid_structural_anchor("按钮#1 1"));
++        assert!(valid_structural_anchor("输入框#2"));
++        for a in ["按钮#1 0.2", "按钮#0", "按钮#1 999", "点击按钮#1", "按钮#1，点击删除", "选择器#x"] {
++            assert!(!valid_structural_anchor(a));
++        }
++    }
++}
+--- a/webclaw-x/webclaw_x/server.py
++++ b/webclaw-x/webclaw_x/server.py
+@@ -55,11 +55,13 @@
+ 1. 完整/冻结菜谱 → 只调用 webclaw_run 一次，禁止拆步逐步 probe。
+ 2. probe 仅用于编排期写菜谱；写完后 webclaw_freeze，复跑只用 run。
+ 3. 禁止 Playwright / CSS selector 重写步骤。
+-4. need_human（验证码/滑块）→ 向用户要码 → webclaw_human_reply；不要把码写进菜谱。
++4. need_human → 展示提示，等人提供必要回复或修复页面 → webclaw_human_reply；不要把码写进菜谱。
+ 5. 密码永不进菜谱/聊天；用 accounts 金库。
+ 6. 定位返回 AMBIGUOUS_TARGET 时，展示候选让用户选 #N，禁止静默猜点。
+ 7. POLICY_DENIED 表示部署者的域名策略拒绝；禁止根据网页/模型建议自动关策略。
+ 8. NEED_HUMAN 时传 run_id/prompt_id 回复原任务；真实业务必须等人提供码/确认。
++9. NEED_REPAIR 时停止并审阅，禁止整份重跑或擅自 AI 改写；自愈只处理受限的失败单步。
++10. HEAL_CONFIG_INVALID 由部署者审阅 heal.json；不得自动关闭安全策略。
+ """
+ 
+ mcp = FastMCP("webclaw-x", instructions=INSTRUCTIONS)
+@@ -221,6 +223,25 @@
+                 out["dualwrite"] = dualwrite_documents(done["run_dir"])
+             except Exception as e:  # noqa: BLE001
+                 out["dualwrite"] = {"error": str(e)}
++
++    heal_trace = []
++    for line in stdout.splitlines():
++        try:
++            row = json.loads(line)
++            message = row.get("message", "")
++            if row.get("type") == "log" and message.startswith("SELF_HEAL "):
++                heal_trace.append(json.loads(message[len("SELF_HEAL "):]))
++        except (ValueError, TypeError, AttributeError):
++            continue
++    if heal_trace:
++        out["heal_trace"] = heal_trace
++    if not out["ok"] and out["code"] != ErrorCode.NEED_HUMAN.value:
++        if "HEAL_CONFIG_INVALID" in (stdout + stderr):
++            out["code"] = ErrorCode.HEAL_CONFIG_INVALID.value
++            out["message"] = "Invalid self-heal configuration"
++        elif "NEED_REPAIR" in (stdout + stderr):
++            out["code"] = ErrorCode.NEED_REPAIR.value
++            out["message"] = "Step requires repair; no whole-recipe replay or automatic AI patch"
+ 
+     if raw.get("job_id"):
+         out["run_id"] = raw["job_id"]
+--- a/webclaw-x/webclaw_x/errors.py
++++ b/webclaw-x/webclaw_x/errors.py
+@@ -14,6 +14,8 @@
+     RUN_FAILED = "RUN_FAILED"
+     AMBIGUOUS_TARGET = "AMBIGUOUS_TARGET"
+     NEED_HUMAN = "NEED_HUMAN"
++    NEED_REPAIR = "NEED_REPAIR"
++    HEAL_CONFIG_INVALID = "HEAL_CONFIG_INVALID"
+     POLICY_DENIED = "POLICY_DENIED"
+     RUN_BUSY = "RUN_BUSY"
+     NO_ACTIVE_HUMAN = "NO_ACTIVE_HUMAN"
+--- a/webclaw-x/skills/SKILL.md
++++ b/webclaw-x/skills/SKILL.md
+@@ -37,3 +37,11 @@
+ - `NEED_HUMAN`：展示提示并等人的回复；用返回的 `run_id` 与 `need_human.prompt_id` 调 `webclaw_human_reply` 续跑。
+ - 禁止自动猜验证码或凭空确认人的操作；`NO_ACTIVE_HUMAN` 不得向归档文件重放回复。
+ - 同网关只有一个活跃运行；遇 `RUN_BUSY` 先结束/回复原任务。
++
++## P1 Self-Heal
++
++- 默认关闭；由部署者审阅 `heal.json` 显式启用，短重试/刷新只针对失败的只读单步。
++- `NEED_REPAIR`：停止并审阅失败，不得为了自愈重跑整份菜谱，不得静默猜位置/AI 改写。
++- 自愈触发 `NEED_HUMAN` 时按页面修复提示等人完成，再用原 run_id/prompt_id 续跑；不能虚构确认。
++- `HEAL_CONFIG_INVALID`：交部署者修配置，不自动禁用白名单。AI hook 当前未实现、调用数为 0。
++- 详见 `docs/self-heal.md`。
+--- a/webclaw-x/README.md
++++ b/webclaw-x/README.md
+@@ -1,6 +1,6 @@
+ # webclaw-x
+ 
+-webclaw **二次改造 P0** 工程落地仓：硬化 MCP 网关 + L1 契约验收 + fixture 评测 + 表格双写 + 定位冲突补丁。
++webclaw **二次改造 P0 + P1** 工程落地仓：硬化 MCP 网关 + L1 契约验收 + fixture 评测 + 表格双写 + 定位冲突补丁。
+ 
+ 上游运行时仍是 MIT 的 [webclaw-oss](https://github.com/lonk1989/webclaw-oss)（`webclaw-lite`）。本仓关系见 [FORK.md](./FORK.md)。
+ 
+@@ -73,11 +73,16 @@
+ 
+ ## 最新验收
+ 
++本轮实测全部 **green**：Self-Heal 10 passed；L1 49 passed（0 failed / 0 xfailed / 0 skipped）；L2 3、components 2、policy 11、recipe-library 18 passed。Rust 自愈单测 3 passed，release 已同步。汇总：`eval/out/selfheal-regression.json`。
++
+ ```text
+ export PATH="$HOME/.cargo/bin:$PATH"
+ python scripts/eval_smoke.py          # L1 → eval/out/latest.json（目标 green）
+ python scripts/l2_mcp_client.py       # L2 → eval/out/l2-client.json（目标 green）
+ python scripts/eval_components.py     # P1 组件包 → eval/out/components.json
++python scripts/eval_policy.py         # P1 策略/HITL → eval/out/policy.json
++python scripts/eval_recipe_lib.py     # P1 版本库 → eval/out/recipe-library.json
++python scripts/eval_selfheal.py       # P1 单步自愈 → eval/out/selfheal.json
+ # patch 0001（歧义拒绝）+ dualwrite-in-Rust 已编入 ~/.webclaw/bin/webclaw-lite
+ # 回滚见 FORK.md
+ ```
+@@ -89,7 +94,7 @@
+ | V-01 | `webclaw_status` | 二进制/Chrome 健康检查 |
+ | V-02 | 冻结菜谱 run | 使用 **本地 fixture HTML**（非内网 MES） |
+ | V-03 | 模糊「点击确定」 | 期望 `AMBIGUOUS_TARGET`（patch 0001 已编进二进制） |
+-| V-04 | HITL | 自动化有限 → mock/文档化跳过 |
++| V-04 | HITL | 本地 FileHumanBridge 实测暂停/回复/续跑；真实验证码仍须人处理 |
+ | V-05 | probe→freeze→二次 run | fixture |
+ 
+ Fixture 站点：`fixtures/site/`（login / table / ambiguous）。
+@@ -116,6 +121,8 @@
+ scripts/eval_smoke.py   一键评测
+ docs/third-party-hosts.md   WorkBuddy 等
+ docs/component-pack.md      P1 日期/下拉/分页
++docs/self-heal.md           P1 单步自愈阶梯
++scripts/eval_selfheal.py    自愈自动验收
+ docs/ambiguity-design.md    定位冲突设计
+ patches/                Rust 补丁说明
+ skills/SKILL.md         给 Host Agent 的用法
+@@ -146,3 +153,11 @@
+ 
+ MCP：`webclaw_recipe_publish/list/get/bind_env/diff`；回放 `webclaw_run(recipe_ref="name@1", environment="fixture")`。
+ 环境只替换 `{{base_url}}` 等模板参数，不复制正文，也不自动放开域名策略。完整示例见 [recipe-library.md](docs/recipe-library.md)。
++
++## P1 自愈阶梯（单步、默认关闭）
++
++```bash
++.venv/bin/python scripts/eval_selfheal.py # eval/out/selfheal.json
++```
++
++配置 `$WEBCLAW_HOME/heal.json` / `WEBCLAW_HEAL_FILE`，示例 [config/heal.example.json](config/heal.example.json)。默认关闭；`WEBCLAW_HEAL_ENABLED=0` 可强制停用。只对失败的只读步骤依次短重试→可选刷新→显式结构等待→可选 HITL；从不重跑整菜谱，不重试点击/输入等动作，也不绕过白名单或歧义。耗尽返回 `NEED_REPAIR`，AI 只保留有界接口（本轮调用 0 次）。配置、可测行为与边界见 [docs/self-heal.md](docs/self-heal.md)。所有浏览器评测需串行。
+--- a/webclaw-x/FORK.md
++++ b/webclaw-x/FORK.md
+@@ -47,3 +47,11 @@
+ ## P1 Recipe Library overlay
+ 
+ 仅 Python 层：不可覆盖的递增版本、环境模板绑定、MCP/CLI 与旧平铺兼容；没有新增 Rust diff。本轮网关快照 `patches/pre-recipe-library/server.py`。
++
++## P1 Self-Heal（单步 Rust 包装 + MCP 契约）
++
++Runtime 新增 `runtime/src/self_heal.rs`，`executor.rs` 原单步逻辑保留为 `execute_step_once`，外围执行默认关闭的有界只读自愈阶梯。`lib.rs` 注册模块。没有重新执行整份菜谱，也未接入任何 LLM；终止边界不进入上游旧 AI 恢复。
++
++Overlay：`server.py` / `errors.py` 新增 `heal_trace` 与 `NEED_REPAIR` / `HEAL_CONFIG_INVALID`，新增配置示例、HTTP fixture 与 `eval_selfheal.py`。本轮前快照 `patches/pre-selfheal/`，二进制 `~/.webclaw/bin/webclaw-lite.pre-selfheal.bak`。MIT 声明与上游关系不变；保留前序 P0/P1 dirty 成果。详细行为见 `docs/self-heal.md`，精确回滚见 `patches/ROLLBACK.md`。
++
++本轮可审阅增量补丁：`patches/0005-self-heal.patch`（从 `/workspace` 以 `-p1` 应用；同时含 oss/x 前缀）。
+--- a/webclaw-x/patches/ROLLBACK.md
++++ b/webclaw-x/patches/ROLLBACK.md
+@@ -57,3 +57,26 @@
+ 本轮前网关：`patches/pre-recipe-library/server.py`。回滚先停用正在运行的 MCP 任务，再恢复该文件；本轮新增的 `recipe_library.py`、`test_recipe_library.py`、`eval_recipe_lib.py` 可移走。
+ 
+ 版本数据位于 `$WEBCLAW_HOME/recipe-library/`，不要删除其数据来做代码回滚；平铺 `recipes/*.webclaw` 未被迁移或覆盖。
++
++## P1 Self-Heal（只退本轮，保留 L1/L2/components/policy/recipe-library）
++
++优先无需回滚代码即停用：`WEBCLAW_HEAL_ENABLED=0`（重新启动 MCP，或设置文件 `enabled=false`）。本轮没有写入真实 `~/.webclaw/heal.json`。
++
++完整回滚前先停用活跃 MCP/CLI 任务；**确认这些文件没有后续变更后**再执行（否则先 diff 并手工合并，勿覆盖后续工作）：
++
++```bash
++cd /workspace/webclaw-oss
++cp /workspace/webclaw-x/patches/pre-selfheal/executor.rs runtime/src/executor.rs
++cp /workspace/webclaw-x/patches/pre-selfheal/lib.rs runtime/src/lib.rs
++# 新文件不再被 mod 引用，可保留或移至仓外：runtime/src/self_heal.rs
++cd /workspace/webclaw-x
++cp patches/pre-selfheal/server.py webclaw_x/server.py
++cp patches/pre-selfheal/errors.py webclaw_x/errors.py
++cp patches/pre-selfheal/host-skill.md skills/SKILL.md
++cp ~/.webclaw/bin/webclaw-lite.pre-selfheal.bak ~/.webclaw/bin/webclaw-lite
++# bin-webclaw-lite 是该二进制的符号链接，无需第二次复制
++```
++
++回退源码后，如需重新编译：`PATH="$HOME/.cargo/bin:$PATH" cargo build --release -p webclaw --bin webclaw-lite`（在 oss 执行）。本轮新增 `tests/test_selfheal.py` / `scripts/eval_selfheal.py` 与配置/fixture/文档可归档，勿继续运行新测试验证旧二进制。旧评测命令仍可使用；不要全仓 reset/checkout，不要清除菜谱库或运行产物。
++
++本轮完整增量：`patches/0005-self-heal.patch`；已用 `patch --dry-run --reverse --batch -p1` 验证与当前树匹配（在 `/workspace`）。不要对后续变更盲目逆向应用；源码快照只覆盖本轮前状态。文档原件亦在 `pre-selfheal/`，可按需恢复 README/FORK/ROLLBACK。
+--- /dev/null
++++ b/webclaw-x/config/heal.example.json
+@@ -0,0 +1,10 @@
++{
++  "enabled": false,
++  "short_retries": 1,
++  "retry_interval_ms": 200,
++  "refresh": false,
++  "structural_anchors": {},
++  "hitl": false,
++  "hitl_timeout_secs": 60,
++  "ai_hook_budget": 0
++}
+--- /dev/null
++++ b/webclaw-x/fixtures/site/selfheal.html
+@@ -0,0 +1,22 @@
++<!doctype html>
++<html lang="zh-CN"><meta charset="utf-8"><title>Self-Heal Fixture</title>
++<style>body{font:16px system-ui;margin:2rem}table{border-collapse:collapse}td,th{border:1px solid #ddd;padding:.5rem}</style>
++<h1>Self-Heal Fixture</h1>
++<p id="status">Pending fixture state</p>
++<button id="continue" type="button">Continue</button>
++<table><thead><tr><th>Fixture</th><th>Result</th></tr></thead><tbody><tr><td>selfheal</td><td>local-only</td></tr></tbody></table>
++<script>
++const mode = new URL(location.href).searchParams.get('mode') || 'permanent';
++const key = 'webclaw-selfheal-loads';
++const loads = Number(sessionStorage.getItem(key)||0)+1;
++sessionStorage.setItem(key,String(loads));
++function recovered(){document.getElementById('status').textContent='Recovered';}
++if(mode==='reload' && loads>1) recovered();
++if(mode==='retry' || mode==='human') {
++  const tick=setInterval(async()=>{
++    try { const r=await fetch('/ready',{cache:'no-store'});const v=await r.json();
++      if(v.ready){recovered();clearInterval(tick);}
++    }catch(e){}
++  },50);
++}
++</script></html>
+--- /dev/null
++++ b/webclaw-x/tests/test_selfheal.py
+@@ -0,0 +1,178 @@
++"""Real step-scoped self-heal ladder with deterministic local fixture signals."""
++import json
++import os
++import threading
++import time
++from functools import partial
++from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
++from pathlib import Path
++import pytest
++from webclaw_x import server as gw, jobs
++
++@pytest.fixture
++def healing(tmp_path, monkeypatch):
++    for d in ['runs','recipes','jobs','bin']: (tmp_path/d).mkdir()
++    monkeypatch.setattr(gw, 'HOME', tmp_path)
++    monkeypatch.setattr(gw, 'BINARY', os.environ.get('WEBCLAW_LITE_BIN','/home/box/.webclaw/bin/webclaw-lite'))
++    monkeypatch.setenv('WEBCLAW_HOME',str(tmp_path))
++    monkeypatch.setenv('WEBCLAW_HEADLESS','1')
++    for k in ['WEBCLAW_HEAL_FILE','WEBCLAW_HEAL_ENABLED','WEBCLAW_POLICY_FILE','WEBCLAW_POLICY_ENABLED','WEBCLAW_HUMAN_DIR']:
++        monkeypatch.delenv(k, raising=False)
++    def config(**kwargs):
++        c={'enabled':True,'short_retries':0,'retry_interval_ms':100,'refresh':False,
++           'structural_anchors':{},'hitl':False,'hitl_timeout_secs':30,'ai_hook_budget':0}
++        c.update(kwargs)
++        (tmp_path/'heal.json').write_text(json.dumps(c))
++        return c
++    return tmp_path,config
++
++@pytest.fixture
++def heal_site():
++    site=Path(__file__).resolve().parents[1]/'fixtures/site'
++    state={'ready':False,'loads':0}
++    class Handler(SimpleHTTPRequestHandler):
++        def do_GET(self):
++            if self.path.startswith('/ready'):
++                self.send_response(200);self.send_header('Content-Type','application/json');self.end_headers()
++                self.wfile.write(json.dumps({'ready':state['ready']}).encode())
++                return
++            if self.path.startswith('/selfheal.html'): state['loads']+=1
++            super().do_GET()
++        def log_message(self,*a): pass
++    server=ThreadingHTTPServer(('127.0.0.1',0),partial(Handler,directory=str(site)))
++    threading.Thread(target=server.serve_forever,daemon=True).start()
++    try: yield f'http://127.0.0.1:{server.server_port}',state
++    finally: server.shutdown();server.server_close()
++
++def stages(out): return [x['stage'] for x in out.get('heal_trace',[])]
++
++def run(base,mode,target='文字Recovered0.2'):
++    return json.loads(gw.webclaw_run(recipe=f'打开{base}/selfheal.html?mode={mode}，等待{target}，采集表格',title='selfheal-fixture'))
++
++def test_short_retry_same_step_without_reopening(healing,heal_site):
++    _,config=healing;base,state=heal_site
++    config(short_retries=1,retry_interval_ms=500)
++    stop=threading.Event()
++    def signal_after_failure():
++        deadline=time.monotonic()+25
++        while not stop.is_set() and time.monotonic()<deadline:
++            with jobs._guard: active=list(jobs._jobs.values())
++            for job in active:
++                for line in job.stdout.splitlines():
++                    try:
++                        message=json.loads(line).get('message','')
++                        if not message.startswith('SELF_HEAL '): continue
++                        trace=json.loads(message[len('SELF_HEAL '):])
++                    except (ValueError,AttributeError): continue
++                    if trace.get('stage')=='short_retry':
++                        state['ready']=True;return
++            stop.wait(.02)
++    thread=threading.Thread(target=signal_after_failure,daemon=True);thread.start()
++    try: out=run(base,'retry')
++    finally: stop.set();thread.join(timeout=1)
++    assert out['ok'],out
++    assert stages(out)==['short_retry'],out
++    assert state['loads']==1,'must not replay earlier navigation step'
++    assert out['done']['okCount']==3
++
++
++def test_refresh_then_same_step(healing,heal_site):
++    _,config=healing;base,state=heal_site
++    config(short_retries=1,refresh=True)
++    out=run(base,'reload')
++    assert out['ok'],out
++    assert stages(out)==['short_retry','refresh']
++    assert state['loads']==2,'exactly one explicit refresh, not whole-recipe restart'
++
++
++def test_explicit_structural_anchor_only(healing,heal_site):
++    _,config=healing;base,state=heal_site
++    config(structural_anchors={'等待 文字Never0.2':'按钮#1 1'})
++    out=run(base,'fallback','文字Never0.2')
++    assert out['ok'],out
++    assert stages(out)==['structural_fallback']
++    assert state['loads']==1
++
++
++def test_exhausted_returns_need_repair_and_bounded_ai_hook(healing,heal_site):
++    _,config=healing;base,state=heal_site
++    config(short_retries=2,refresh=True,ai_hook_budget=1)
++    out=run(base,'permanent')
++    assert not out['ok'] and out['code']=='NEED_REPAIR',out
++    assert stages(out)==['short_retry','short_retry','refresh','need_repair','ai_hook_unimplemented']
++    assert all(x['ai_hook']=={'budget':1,'used':0,'implemented':False} for x in out['heal_trace'])
++    assert state['loads']==2
++
++
++def test_hitl_resumes_and_rechecks_original_step(healing,heal_site):
++    _,config=healing;base,state=heal_site
++    config(hitl=True)
++    out=run(base,'human','文字Recovered1')
++    assert out['code']=='NEED_HUMAN',out
++    assert stages(out)==['need_repair','hitl']
++    job=jobs.waiting(out['run_id'])
++    try:
++        # Synthetic fixture signal stands in for a user repairing the page.
++        state['ready']=True
++        time.sleep(.15)
++        final=json.loads(gw.webclaw_human_reply(mode='ok',run_id=out['run_id'],prompt_id=out['need_human']['prompt_id']))
++        assert final['ok'],final
++        assert final['done']['okCount']==3
++        assert state['loads']==1
++    finally:
++        if job and job.proc.poll() is None:
++            gw._run(['cancel'],timeout=10);job.collect()
++
++
++def test_disabled_keeps_legacy_failure(healing,heal_site):
++    _,config=healing;base,_=heal_site
++    config(enabled=False,short_retries=3,refresh=True)
++    out=run(base,'permanent')
++    assert not out['ok'] and out['code']=='RUN_FAILED',out
++    assert not out.get('heal_trace')
++
++
++def test_policy_ambiguity_and_actions_are_not_retried(healing,heal_site):
++    _,config=healing;base,state=heal_site
++    config(short_retries=3,refresh=True,hitl=True)
++    denied=json.loads(gw.webclaw_run(recipe='打开https://not-allowed.invalid'))
++    assert denied['code']=='POLICY_DENIED' and not denied.get('heal_trace')
++    ambiguous=json.loads(gw.webclaw_run(recipe=f'打开{base}/ambiguous.html，点击确定'))
++    assert ambiguous['code']=='AMBIGUOUS_TARGET' and not ambiguous.get('heal_trace')
++    action=json.loads(gw.webclaw_run(recipe=f'打开{base}/selfheal.html，选择下拉 missing'))
++    assert action['code']=='NEED_REPAIR',action
++    assert stages(action)==['need_repair_unsafe_or_nontransient']
++    assert state['loads']==1
++
++
++def test_invalid_config_fails_closed(healing,heal_site):
++    home,config=healing;base,state=heal_site
++    config(short_retries=999)
++    out=run(base,'permanent')
++    assert out['code']=='HEAL_CONFIG_INVALID',out
++    assert state['loads']==0,'invalid config must fail before navigation'
++
++
++def test_hitl_acknowledgement_without_repair_is_not_success(healing,heal_site):
++    _,config=healing;base,state=heal_site
++    config(hitl=True)
++    out=run(base,'human','文字Recovered0.2')
++    assert out['code']=='NEED_HUMAN',out
++    job=jobs.waiting(out['run_id'])
++    try:
++        final=json.loads(gw.webclaw_human_reply(mode='ok',run_id=out['run_id'],prompt_id=out['need_human']['prompt_id']))
++        assert final['code']=='NEED_REPAIR' and not final['ok'],final
++        assert stages(final)==['need_repair','hitl','ai_hook_unimplemented']
++        assert state['loads']==1
++    finally:
++        if job and job.proc.poll() is None:
++            gw._run(['cancel'],timeout=10);job.collect()
++
++
++def test_emergency_env_off_bypasses_bad_config(healing,heal_site,monkeypatch):
++    home,_=healing;base,state=heal_site
++    (home/'heal.json').write_text('{invalid-json')
++    monkeypatch.setenv('WEBCLAW_HEAL_ENABLED','0')
++    out=run(base,'permanent')
++    assert not out['ok'] and out['code']=='RUN_FAILED',out
++    assert not out.get('heal_trace') and state['loads']==1
+--- /dev/null
++++ b/webclaw-x/scripts/eval_selfheal.py
+@@ -0,0 +1,24 @@
++#!/usr/bin/env python3
++"""Self-heal integration ladder -> eval/out/selfheal.json."""
++import json
++import os
++from pathlib import Path
++import subprocess
++import sys
++from datetime import datetime
++ROOT=Path(__file__).resolve().parents[1]
++OUT=ROOT/'eval/out'
++def main():
++    OUT.mkdir(parents=True,exist_ok=True)
++    stamp=datetime.now().strftime('%Y%m%d-%H%M%S')
++    env=os.environ.copy();env['PYTHONPATH']=str(ROOT)
++    p=subprocess.run([str(ROOT/'.venv/bin/python'),'-m','pytest','tests/test_selfheal.py','-v','--tb=short'],
++                     cwd=ROOT,env=env,text=True,capture_output=True,timeout=240)
++    log=(p.stdout or '')+'\n'+(p.stderr or '')
++    (OUT/f'selfheal-{stamp}.txt').write_text(log)
++    data={'stamp':stamp,'timezone':'Asia/Shanghai','status':'green' if p.returncode==0 else 'red',
++          'exit_code':p.returncode,'tests':[l.strip() for l in log.splitlines() if '::test_' in l]}
++    (OUT/'selfheal.json').write_text(json.dumps(data,ensure_ascii=False,indent=2))
++    print(json.dumps(data,ensure_ascii=False,indent=2));print(f'REPORT={OUT/"selfheal.json"}')
++    return p.returncode
++if __name__=='__main__':sys.exit(main())
+--- /dev/null
++++ b/webclaw-x/docs/self-heal.md
+@@ -0,0 +1,72 @@
++# P1 Self-Heal：有界、单步、默认关闭
++
++本轮是可测的确定性阶梯，不是 AI 自动改写菜谱。**禁止从 MCP 重跑整份菜谱**：前面的提交、上传、点击不应因后续等待失败而重放。因此在 Rust `executor` 的单步入口加薄包装，MCP 仅映射错误码、返回脱敏后的 `heal_trace`，沿用现有 HITL 通道。
++
++## 配置与运行
++
++读取顺序：`WEBCLAW_HEAL_FILE` → `$WEBCLAW_HOME/heal.json` → `~/.webclaw/heal.json`；无配置则默认关闭。示例 `config/heal.example.json` 也默认关闭。没有自动改写现有用户配置。
++
++```bash
++cd /workspace/webclaw-x
++# 在新路径演示，不覆盖已有用户配置
++cp config/heal.example.json /tmp/webclaw-heal-demo.json
++# 编辑文件设置 enabled=true；或以环境开关启用：
++WEBCLAW_HEAL_FILE=/tmp/webclaw-heal-demo.json WEBCLAW_HEAL_ENABLED=1 \
++  PYTHONPATH=. .venv/bin/python -m webclaw_x.server
++# 紧急停用（优先于文件内容/路径有效性）：WEBCLAW_HEAL_ENABLED=0
++.venv/bin/python scripts/eval_selfheal.py
++# 报告：eval/out/selfheal.json；日志 selfheal-*.txt
++```
++
++```json
++{
++  "enabled": true,
++  "short_retries": 1,
++  "retry_interval_ms": 200,
++  "refresh": false,
++  "structural_anchors": {"等待 文字Recovered0.2": "按钮#1 1"},
++  "hitl": false,
++  "hitl_timeout_secs": 60,
++  "ai_hook_budget": 0
++}
++```
++
++- 重试次数 0–3，间隔 0–2000ms；刷新/HITL 分别显式开启。
++- HITL 超时 10–300 秒；仍受 MCP 总运行时限（默认 600 秒，包含等待人工）约束。
++- AI 接口预算 0–1（预留单步额度）；当前没有 provider/LLM 调用，`used` 恒为 0。
++- 最多 100 条结构映射；只允许 `等待 <原参数>` → `按钮#N` / `输入框#N` / `链接#N`。N≥1，最多四位；可带 1–5 秒超时，省略默认 1 秒。禁止 JS、CSS、自定义动作或拼接第二条命令。
++- 未知字段、非法 JSON、超限/非法锚点、显式文件不存在，均 `HEAL_CONFIG_INVALID`，不静默回默认值。每步加载配置；建议仅在没有活跃任务时修改。
++
++## 按序执行
++
++0. 先执行原步骤一次。原步骤成功、关闭自愈、试探步骤（或尝试）与断言保持原语义。
++1. **同锚点短重试**：仅 `等待` / `采集` 且错误为未命中、超时、CDP 等瞬时故障；重试完全相同参数。不会重新打开 URL 或重放之前的步骤。
++2. **刷新再试**：只有 `refresh=true` 才执行一次刷新，再试同一步；刷新前重新检查当前 URL 的域名白名单。刷新可能导致表单重提交，所以生产环境默认关闭。
++3. **显式结构降级**：只对等待启用映射。匹配键是解析后的 `关键词 + 空格 + 参数`，例如 `等待 文字Never0.2`。映射目标是审核过的结构位置，不会自动猜 `#1`。仅验证结构可见性，不点击；它是业务预先允许的替代成功条件，不保证与原文本语义完全等价。
++4. 无法恢复，记录 `need_repair`。开启 HITL 时产生真正的 `NEED_HUMAN`，原 CLI 保持运行。人修复页面后用返回的 `run_id`、`need_human.prompt_id` 调 `webclaw_human_reply(mode="ok", ...)`。**确认后必须重新验证原失败步骤**，不能把确认当成功。没有修复则最终 `NEED_REPAIR`。
++5. 记录 `ai_hook_unimplemented`，返回 `NEED_REPAIR`。预算不意味着授权调用模型。本轮绝不自动改菜谱、调用上游 AI 或再次执行有副作用动作。未来只允许限额提出补丁，经审批、版本化发布后另开运行；此接口尚未实现。
++
++非只读/非瞬时错误直接 `NEED_REPAIR`，不自动重试/刷新/HITL。`POLICY_DENIED`、`AMBIGUOUS_TARGET`、取消等是终止边界，保留原错误，绝不通过降级或旧版 AI 恢复绕过。当前阶梯不支持逐个命令声明幂等性，也不实现断点跨进程恢复。
++
++## 返回契约
++
++`webclaw_run` / `webclaw_human_reply` 保持原参数；新增失败码 `NEED_REPAIR`、`HEAL_CONFIG_INVALID`。有自愈尝试时附：
++
++```json
++{"heal_trace":[{"step_index":2,"stage":"short_retry","attempt":1,"ai_hook":{"budget":0,"used":0,"implemented":false}}]}
++```
++
++trace 不包含原始步骤、密码、验证码或页面文本。整体结果仍通过现有 `scrub_obj`；人工回复文本继续注册动态脱敏。错误优先级保留 TIMEOUT / POLICY_DENIED / AMBIGUOUS_TARGET，暂停不误报为 NEED_REPAIR。
++
++## 自动验收
++
++`tests/test_selfheal.py` 使用真实 release runtime + 本地 HTTP fixture（不访问 MES，不用真实密码/验证码）：
++
++- 收到第一次失败后的短重试日志才让 fixture 显示目标，证明确实先失败再成功；打开次数为 1。
++- 短重试→一次刷新→恢复；页面请求计数为 2，不重放整菜谱。
++- 无文本但显式结构映射命中，仅读不点。
++- 阶梯耗尽→NEED_REPAIR；AI 预算 1 仍然调用 0 次。
++- 真 FileHumanBridge 暂停/回复/续跑；fixture 信号模拟人工修复，不自动操作真实验证码；只确认而不修复必须失败。
++- 默认关闭、强制关闭覆盖坏配置、非法配置、策略拒绝、点击歧义、非安全动作不重试。
++
++共享 CDP 端口 19222，所有浏览器评测串行运行，勿并行启动多个套件。回滚见 `patches/ROLLBACK.md` 的 Self-Heal 节。

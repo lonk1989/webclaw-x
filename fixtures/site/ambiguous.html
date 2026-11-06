@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>Fixture 歧义点击</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; }
+    .row { margin: 1rem 0; padding: 1rem; border: 1px solid #ddd; }
+    button { margin-right: 0.75rem; padding: 0.4rem 0.9rem; }
+    #log { margin-top: 1.5rem; white-space: pre-wrap; background: #f7f7f7; padding: 1rem; }
+  </style>
+</head>
+<body>
+  <h1>歧义按钮页</h1>
+  <p>页面上有多个文案同为「确定」的按钮，用于验证定位冲突。</p>
+  <div class="row">
+    <span>对话框 A</span>
+    <button type="button" onclick="log('A')">确定</button>
+    <button type="button" onclick="log('A-cancel')">取消</button>
+  </div>
+  <div class="row">
+    <span>对话框 B</span>
+    <button type="button" onclick="log('B')">确定</button>
+    <button type="button" onclick="log('B-cancel')">取消</button>
+  </div>
+  <div class="row">
+    <span>对话框 C</span>
+    <button type="button" onclick="log('C')">确定</button>
+  </div>
+  <div id="log">尚未点击</div>
+  <script>
+    function log(which) {
+      document.getElementById('log').textContent = 'clicked:' + which + ' @ ' + new Date().toISOString();
+    }
+  </script>
+</body>
+</html>

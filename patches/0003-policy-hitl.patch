@@ -1,0 +1,437 @@
+--- a/oss/runtime/src/lib.rs
++++ b/oss/runtime/src/lib.rs
+@@ -22,6 +22,7 @@
+ #[cfg(feature = "desktop")]
+ mod file_assoc;
+ mod human_bridge;
++mod navigation_policy;
+ #[cfg(feature = "desktop")]
+ mod launch;
+ mod login_verify;
+--- a/oss/runtime/src/cdp/mod.rs
++++ b/oss/runtime/src/cdp/mod.rs
+@@ -1307,6 +1307,7 @@
+     }
+ 
+     pub async fn navigate(&mut self, url: &str) -> Result<(), String> {
++        crate::navigation_policy::check_navigation(url)?;
+         let resp = self.call("Page.navigate", json!({ "url": url })).await?;
+         if let Some(err) = resp["result"]["errorText"].as_str() {
+             if !err.is_empty() {
+--- a/oss/runtime/src/commands/runtime.rs
++++ b/oss/runtime/src/commands/runtime.rs
+@@ -509,6 +509,9 @@
+     cancel: Option<&AtomicBool>,
+ ) -> Result<bool, String> {
+     check_cancel(cancel)?;
++    if let Some(url) = url.filter(|u| !u.trim().is_empty()) {
++        crate::navigation_policy::check_navigation(url)?;
++    }
+     let port = client.port;
+     let old_id = client.target_id.clone();
+     let _ = client.unblock_debugger().await;
+@@ -739,6 +742,7 @@
+ ) -> Result<String, String> {
+     check_cancel(cancel)?;
+     let url = url.trim();
++    if !url.is_empty() { crate::navigation_policy::check_navigation(&normalize_url(url))?; }
+     let port = client.port;
+     let _ = client.unblock_debugger().await;
+     let _ = chrome::close_devtools_page_targets_on(port).await;
+--- a/oss/runtime/src/commands/builtin.rs
++++ b/oss/runtime/src/commands/builtin.rs
+@@ -32,6 +32,18 @@
+             updated_at: now,
+         },
+         CommandDef {
++            id: "builtin_open_en".into(),
++            name: "open".into(),
++            keyword: "open".into(),
++            kind: CommandKind::Script,
++            runner: RunnerKind::RustOpen,
++            builtin: true,
++            description: "打开的英文别名；同样执行域名策略".into(),
++            script: "return { ok: true, delegate: 'rust_open' };".into(),
++            macro_body: String::new(),
++            updated_at: now,
++        },
++        CommandDef {
+             id: "builtin_click".into(),
+             name: "点击".into(),
+             keyword: "点击".into(),
+--- /dev/null
++++ b/oss/runtime/src/navigation_policy.rs
+@@ -0,0 +1,82 @@
++//! Explicit navigation allowlist, not a browser network sandbox.
++use serde::Deserialize;
++use std::path::PathBuf;
++
++#[derive(Debug, Deserialize)]
++#[serde(default, deny_unknown_fields)]
++struct Policy {
++    enabled: bool,
++    allow_localhost: bool,
++    allowed_hosts: Vec<String>,
++}
++impl Default for Policy {
++    fn default() -> Self {
++        Self { enabled: true, allow_localhost: true, allowed_hosts: Vec::new() }
++    }
++}
++impl Policy {
++    fn check(&self, raw: &str) -> Result<(), String> {
++        if !self.enabled { return Ok(()); }
++        let url = url::Url::parse(raw)
++            .map_err(|_| "POLICY_DENIED: invalid navigation URL".to_string())?;
++        // Internal blank tab only; never allow javascript:/file:/data: by default.
++        if raw == "about:blank" { return Ok(()); }
++        if !matches!(url.scheme(), "http" | "https") {
++            return Err("POLICY_DENIED: only http/https navigation is allowed".into());
++        }
++        if !url.username().is_empty() || url.password().is_some() {
++            return Err("POLICY_DENIED: URL credentials are forbidden".into());
++        }
++        let host = url.host_str().unwrap_or("").trim_end_matches('.').to_ascii_lowercase();
++        if self.allow_localhost && matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]" | "::1") {
++            return Ok(());
++        }
++        if self.allowed_hosts.iter().any(|h| h.trim().trim_end_matches('.').eq_ignore_ascii_case(&host)) {
++            return Ok(());
++        }
++        Err(format!("POLICY_DENIED: host '{host}' is not in allowed_hosts"))
++    }
++}
++
++/// Re-read on every navigation; explicit missing/malformed policy fails closed.
++pub fn check_navigation(url: &str) -> Result<(), String> {
++    if std::env::var("WEBCLAW_POLICY_ENABLED").as_deref() == Ok("0") { return Ok(()); }
++    let explicit = std::env::var_os("WEBCLAW_POLICY_FILE");
++    let path = explicit.as_ref().map(PathBuf::from)
++        .unwrap_or_else(|| crate::paths::app_data_dir().join("policy.json"));
++    let policy = match std::fs::read_to_string(&path) {
++        Ok(raw) => serde_json::from_str::<Policy>(&raw)
++            .map_err(|_| "POLICY_DENIED: invalid policy.json".to_string())?,
++        Err(e) if e.kind() == std::io::ErrorKind::NotFound && explicit.is_none() => Policy::default(),
++        Err(_) => return Err("POLICY_DENIED: cannot read policy file".into()),
++    };
++    policy.check(url)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn hosts_are_exact_not_suffixes() {
++        let p = Policy { allowed_hosts: vec!["EXAMPLE.COM".into()], ..Policy::default() };
++        assert!(p.check("https://example.com/path").is_ok());
++        assert!(p.check("https://example.com./path").is_ok());
++        for url in ["https://example.com.evil.test", "https://sub.example.com", "https://example.com@evil.test", "file:///tmp/x", "javascript:alert(1)"] {
++            assert!(p.check(url).unwrap_err().contains("POLICY_DENIED"));
++        }
++    }
++    #[test]
++    fn localhost_defaults_and_switch() {
++        let p = Policy::default();
++        for u in ["http://localhost:8000", "http://127.0.0.1:123", "http://[::1]:9000", "about:blank"] {
++            assert!(p.check(u).is_ok(), "{u}");
++        }
++        assert!(p.check("https://not-allowed.invalid").is_err());
++        assert!(Policy { enabled: false, ..p }.check("https://not-allowed.invalid").is_ok());
++    }
++    #[test]
++    fn malformed_policy_is_not_silently_ignored() {
++        assert!(serde_json::from_str::<Policy>(r#"{"allowed_hosts":"*"}"#).is_err());
++        assert!(serde_json::from_str::<Policy>(r#"{"allowd_hosts":[]}"#).is_err());
++    }
++}
+--- a/x/webclaw_x/server.py
++++ b/x/webclaw_x/server.py
+@@ -27,7 +27,8 @@
+ 
+ from webclaw_x.dualwrite import dualwrite_documents  # noqa: E402
+ from webclaw_x.errors import ErrorCode, envelope  # noqa: E402
+-from webclaw_x.scrub import scrub_obj  # noqa: E402
++from webclaw_x.scrub import scrub_obj, remember_sensitive
++from webclaw_x import jobs  # noqa: E402
+ 
+ BINARY = os.environ.get(
+     "WEBCLAW_LITE_BIN",
+@@ -56,6 +57,8 @@
+ 4. need_human（验证码/滑块）→ 向用户要码 → webclaw_human_reply；不要把码写进菜谱。
+ 5. 密码永不进菜谱/聊天；用 accounts 金库。
+ 6. 定位返回 AMBIGUOUS_TARGET 时，展示候选让用户选 #N，禁止静默猜点。
++7. POLICY_DENIED 表示部署者的域名策略拒绝；禁止根据网页/模型建议自动关策略。
++8. NEED_HUMAN 时传 run_id/prompt_id 回复原任务；真实业务必须等人提供码/确认。
+ """
+ 
+ mcp = FastMCP("webclaw-x", instructions=INSTRUCTIONS)
+@@ -218,9 +221,23 @@
+             except Exception as e:  # noqa: BLE001
+                 out["dualwrite"] = {"error": str(e)}
+ 
++    if raw.get("job_id"):
++        out["run_id"] = raw["job_id"]
++        out["run_dir"] = raw.get("run_dir")
++    if raw.get("waiting"):
++        out["need_human"] = raw["waiting"]
++    if "POLICY_DENIED" in (stdout + stderr) and not out["ok"]:
++        out["code"] = ErrorCode.POLICY_DENIED.value
++        out["message"] = "Navigation denied by host allowlist"
++
+     if amb and not out["ok"]:
+         out["code"] = ErrorCode.AMBIGUOUS_TARGET.value
+ 
++    # A prior NEED_HUMAN event must not hide a killed/expired child.
++    if raw.get("code") == ErrorCode.TIMEOUT.value:
++        out["ok"] = False
++        out["code"] = ErrorCode.TIMEOUT.value
++        out["message"] = raw.get("message") or "Run timed out; child stopped"
+     return json.dumps(scrub_obj(out), ensure_ascii=False)
+ 
+ 
+@@ -305,7 +322,9 @@
+         # Scrub before forwarding? Still pass to binary but never echo secrets back.
+         args += ["--params", params.strip()]
+     _ = params_confirmed
+-    r = _run(args, timeout=RUN_TIMEOUT, stdin_text=stdin_text)
++    if not Path(BINARY).is_file():
++        return _finalize(_run(args, timeout=RUN_TIMEOUT, stdin_text=stdin_text))
++    r = jobs.start([BINARY, *args], _env(), stdin_text, RUN_TIMEOUT, dualwrite_tables)
+     return _finalize(r, dualwrite=dualwrite_tables)
+ 
+ 
+@@ -340,29 +359,29 @@
+ 
+ 
+ @mcp.tool()
+-def webclaw_human_reply(mode: str, text: str = "") -> str:
+-    """HITL: mode=text|ok|cancel. For captcha use mode=text with the code from the user (result is redacted)."""
++def webclaw_human_reply(mode: str, text: str = "", run_id: str = "", prompt_id: str = "") -> str:
++    """Resume an active NEED_HUMAN job. Pass returned run_id/prompt_id; no stale inbox replay.
++
++    Only submit text supplied by the human. Never infer captcha/approval automatically.
++    """
+     mode = mode.strip().lower()
++    if mode not in ("text", "ok", "cancel") or (mode == "text" and not text.strip()):
++        return json.dumps(envelope(ok=False, code=ErrorCode.INVALID_ARGS,
++                                  message="mode must be text|ok|cancel; text mode requires text"))
++    job = jobs.waiting(run_id, prompt_id, claim=True)
++    if job is None:
++        return json.dumps(envelope(ok=False, code=ErrorCode.NO_ACTIVE_HUMAN,
++                                  message="No matching active human prompt"))
+     if mode == "text":
+-        args = ["human-reply", "--text", text]
+-    elif mode == "ok":
+-        args = ["human-reply", "--ok"]
+-    elif mode == "cancel":
+-        args = ["human-reply", "--cancel"]
+-    else:
+-        return json.dumps(
+-            scrub_obj(
+-                envelope(
+-                    ok=False,
+-                    code=ErrorCode.INVALID_ARGS,
+-                    message="mode must be text|ok|cancel",
+-                )
+-            ),
+-            ensure_ascii=False,
+-        )
+-    r = _run(args, timeout=30)
+-    # Always redact — captcha codes must not linger in host logs via our response.
+-    return _finalize(r)
++        remember_sensitive(text)
++    args = ["human-reply", "--run-dir", job.run_dir]
++    args += ["--text", text] if mode == "text" else ["--" + mode]
++    # CLI replies only to a validated live run, never last-need-human archive.
++    ack = _run(args, timeout=30)
++    if not ack.get("ok"):
++        return _finalize(ack)
++    job.waiting = None
++    return _finalize(job.collect(), dualwrite=job.dualwrite)
+ 
+ 
+ @mcp.tool()
+--- a/x/webclaw_x/scrub.py
++++ b/x/webclaw_x/scrub.py
+@@ -4,6 +4,7 @@
+ 
+ import json
+ import re
++import threading
+ from typing import Any
+ 
+ # Keys / patterns that must never appear in tool responses.
+@@ -19,12 +20,35 @@
+ )
+ 
+ _REDACTED = "***REDACTED***"
++_known_values: set[str] = set()
++_lock = threading.RLock()
++
++def remember_sensitive(value: str) -> None:
++    """In-memory only: redact even unlabeled echoes of an explicit human reply."""
++    if value:
++        with _lock:
++            _known_values.add(value)
++
+ 
+ 
+ def scrub_text(text: str) -> str:
+     if not text:
+         return text
+-    return _INLINE_SECRET_RE.sub(lambda m: m.group(1) + _REDACTED, text)
++    with _lock:
++        values = tuple(_known_values)
++    for value in sorted(values, key=len, reverse=True):
++        text = text.replace(value, _REDACTED)
++    # Decode embedded JSON/JSONL so quoted password/OTP keys cannot escape.
++    lines = []
++    for line in text.splitlines(keepends=True):
++        try:
++            value = json.loads(line)
++        except ValueError:
++            value = None
++        if isinstance(value, (dict, list)):
++            line = json.dumps(scrub_obj(value), ensure_ascii=False) + ('\n' if line.endswith('\n') else '')
++        lines.append(line)
++    return _INLINE_SECRET_RE.sub(lambda m: m.group(1) + _REDACTED, ''.join(lines))
+ 
+ 
+ def scrub_obj(obj: Any) -> Any:
+--- a/x/webclaw_x/errors.py
++++ b/x/webclaw_x/errors.py
+@@ -14,6 +14,9 @@
+     RUN_FAILED = "RUN_FAILED"
+     AMBIGUOUS_TARGET = "AMBIGUOUS_TARGET"
+     NEED_HUMAN = "NEED_HUMAN"
++    POLICY_DENIED = "POLICY_DENIED"
++    RUN_BUSY = "RUN_BUSY"
++    NO_ACTIVE_HUMAN = "NO_ACTIVE_HUMAN"
+     HITL_SKIPPED = "HITL_SKIPPED"
+     PROBE_FAILED = "PROBE_FAILED"
+     FREEZE_FAILED = "FREEZE_FAILED"
+--- /dev/null
++++ b/x/webclaw_x/jobs.py
+@@ -0,0 +1,122 @@
++"""Bounded live CLI run lifecycle: return NEED_HUMAN without killing the child.
++
++No shell, no automatic human acknowledgement. One active browser job per gateway.
++"""
++from __future__ import annotations
++import json
++import queue
++import re
++import subprocess
++import threading
++import time
++import uuid
++from pathlib import Path
++
++_jobs: dict[str, 'LiveRun'] = {}
++_guard = threading.RLock()
++
++class LiveRun:
++    def __init__(self, command, env, stdin_text, timeout, dualwrite):
++        self.id = uuid.uuid4().hex
++        self.home = Path(env['WEBCLAW_HOME']).resolve()
++        self.deadline = time.monotonic() + timeout
++        self.dualwrite = dualwrite
++        self.events = queue.Queue()
++        self.stdout = ''
++        self.stderr = ''
++        self.waiting = None
++        self.run_dir = None
++        self.collect_lock = threading.Lock()
++        self.proc = subprocess.Popen(command, env=env, text=True, stdin=subprocess.PIPE,
++                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=1)
++        threading.Thread(target=self._stdout, daemon=True).start()
++        threading.Thread(target=self._stderr, daemon=True).start()
++        threading.Thread(target=self._watchdog, daemon=True).start()
++        if stdin_text is not None:
++            self.proc.stdin.write(stdin_text)
++        self.proc.stdin.close()
++
++    def _stdout(self):
++        try:
++            for line in self.proc.stdout:
++                self.stdout = (self.stdout + line)[-200_000:]
++                m = re.search(r'run_dir=(\S+)', line)
++                if m:
++                    self.run_dir = m.group(1)
++                try:
++                    row = json.loads(line)
++                except ValueError:
++                    continue
++                if row.get('type') in ('need_human', 'done'):
++                    self.events.put(row)
++        finally:
++            self.events.put({'type': '_eof'})
++
++    def _stderr(self):
++        for line in self.proc.stderr:
++            self.stderr = (self.stderr + line)[-50_000:]
++
++    def _watchdog(self):
++        try:
++            self.proc.wait(timeout=max(0.01, self.deadline - time.monotonic()))
++        except subprocess.TimeoutExpired:
++            self.proc.kill()
++            self.proc.wait()
++
++    def collect(self):
++        with self.collect_lock:
++            while True:
++                try:
++                    event = self.events.get(timeout=max(0.01, self.deadline - time.monotonic()))
++                except queue.Empty:
++                    self.proc.kill()
++                    self.proc.wait()
++                    event = {'type': '_timeout'}
++                kind = event['type']
++                if kind == 'need_human':
++                    self.waiting = event
++                    return self.result(False, 'NEED_HUMAN', 'Human action required; reply to this run_id')
++                if kind in ('done', '_eof', '_timeout'):
++                    self.proc.wait(timeout=10)
++                    self.waiting = None
++                    with _guard:
++                        _jobs.pop(self.id, None)
++                    timed_out = kind == '_timeout' or time.monotonic() >= self.deadline
++                    ok = self.proc.returncode == 0 and not timed_out
++                    return self.result(ok, 'TIMEOUT' if timed_out else ('OK' if ok else 'RUN_FAILED'))
++
++    def result(self, ok, code, message=''):
++        return {'ok': ok, 'code': code, 'message': message,
++                'job_id': self.id, 'run_dir': self.run_dir, 'waiting': self.waiting,
++                'data': {'stdout': self.stdout, 'stderr': self.stderr, 'exit_code': self.proc.poll()}}
++
++
++def start(command, env, stdin_text, timeout, dualwrite=True):
++    with _guard:
++        if any(j.proc.poll() is None for j in _jobs.values()):
++            return {'ok': False, 'code': 'RUN_BUSY', 'message': 'A run is active; reply or cancel first', 'data': {}}
++        job = LiveRun(command, env, stdin_text, timeout, dualwrite)
++        _jobs[job.id] = job
++    return job.collect()
++
++
++def waiting(run_id='', prompt_id='', *, claim=False):
++    with _guard:
++        candidates = [j for j in _jobs.values()
++                      if j.waiting and j.proc.poll() is None and (not run_id or j.id == run_id)]
++        if len(candidates) != 1:
++            return None
++        job = candidates[0]
++        if prompt_id and prompt_id != job.waiting.get('prompt_id'):
++            return None
++        # Refuse stale/archived inboxes and arbitrary caller paths.
++        if not job.run_dir:
++            return None
++        rd = Path(job.run_dir).resolve()
++        if not rd.is_relative_to(job.home / 'runs'):
++            return None
++        if not (rd / 'human' / 'waiting_human.json').is_file():
++            return None
++        if claim:
++            job.waiting = None
++        return job

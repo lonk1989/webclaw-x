@@ -1,0 +1,3 @@
+# Fixture 加油记录（本地静态站，无真实凭据）
+# 将 PORT 换成 scripts 起的 fixture HTTP 端口，或直接用 file/eval 注入的 URL
+打开http://127.0.0.1:8765/table.html，等待2，采集表格

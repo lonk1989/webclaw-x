@@ -1,0 +1,15 @@
+{
+  "name": "fuel",
+  "version": 2,
+  "tags": [
+    "fixture",
+    "table"
+  ],
+  "read_only": true,
+  "parameters": {},
+  "placeholders": [
+    "base_url"
+  ],
+  "sha256": "1fbcca376b316017e544afcdf68f4a616d93f758ad84b722ae3abaed8a020363",
+  "created_at": "2026-11-06T11:21:55.154162+08:00"
+}

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><title>Self-Heal Fixture</title>
+<style>body{font:16px system-ui;margin:2rem}table{border-collapse:collapse}td,th{border:1px solid #ddd;padding:.5rem}</style>
+<h1>Self-Heal Fixture</h1>
+<p id="status">Pending fixture state</p>
+<button id="continue" type="button">Continue</button>
+<table><thead><tr><th>Fixture</th><th>Result</th></tr></thead><tbody><tr><td>selfheal</td><td>local-only</td></tr></tbody></table>
+<script>
+const mode = new URL(location.href).searchParams.get('mode') || 'permanent';
+const key = 'webclaw-selfheal-loads';
+const loads = Number(sessionStorage.getItem(key)||0)+1;
+sessionStorage.setItem(key,String(loads));
+function recovered(){document.getElementById('status').textContent='Recovered';}
+if(mode==='reload' && loads>1) recovered();
+if(mode==='retry' || mode==='human') {
+  const tick=setInterval(async()=>{
+    try { const r=await fetch('/ready',{cache:'no-store'});const v=await r.json();
+      if(v.ready){recovered();clearInterval(tick);}
+    }catch(e){}
+  },50);
+}
+</script></html>

@@ -1,0 +1,612 @@
+--- a/webclaw_x/server.py
++++ b/webclaw_x/server.py
+@@ -28,7 +28,8 @@
+ from webclaw_x.dualwrite import dualwrite_documents  # noqa: E402
+ from webclaw_x.errors import ErrorCode, envelope  # noqa: E402
+ from webclaw_x.scrub import scrub_obj, remember_sensitive
+-from webclaw_x import jobs  # noqa: E402
++from webclaw_x import jobs
++from webclaw_x.recipe_library import RecipeLibrary, LibraryError  # noqa: E402
+ 
+ BINARY = os.environ.get(
+     "WEBCLAW_LITE_BIN",
+@@ -289,6 +290,8 @@
+     params_confirmed: bool = False,
+     title: str = "",
+     dualwrite_tables: bool = True,
++    recipe_ref: str = "",
++    environment: str = "",
+ ) -> str:
+     """Execute a Chinese recipe ONCE. Prefer full body; never split frozen recipes into probe steps.
+ 
+@@ -297,7 +300,27 @@
+     params: optional JSON object string for 参数 overrides (no passwords).
+     params_confirmed: host-side gate after user confirmed placeholders.
+     dualwrite_tables: after success, parse documents/*.md tables → .json/.csv.
++    recipe_ref: versioned name@version (or latest name), exclusive with recipe/recipe_path.
++    environment: shared non-secret environment binding for recipe_ref, e.g. fixture.
+     """
++    resolved_version = None
++    if environment and not recipe_ref:
++        return json.dumps(envelope(ok=False, code="RECIPE_INVALID_ARGS", message="environment requires recipe_ref"))
++    if recipe_ref:
++        if recipe.strip() or recipe_path.strip():
++            return json.dumps(envelope(ok=False, code="RECIPE_INVALID_ARGS", message="recipe_ref is exclusive with recipe/recipe_path"))
++        try:
++            loaded = RecipeLibrary(HOME).get(recipe_ref, environment=environment,
++                                              parameters=json.loads(params or "{}"), render=True)
++            recipe = loaded["recipe"]
++            params = ""  # Values rendered once; do not forward library env as runtime param metadata.
++            resolved_version = {"name": loaded["name"], "version": loaded["version"],
++                                "environment": loaded["environment"], "sha256": loaded.get("sha256"),
++                                "rendered_sha256": loaded.get("rendered_sha256")}
++        except LibraryError as exc:
++            return json.dumps(envelope(ok=False, code=exc.code, message=str(exc)), ensure_ascii=False)
++        except (ValueError, OSError):
++            return json.dumps(envelope(ok=False, code="RECIPE_INVALID_ARGS", message="Invalid library reference or parameters JSON"))
+     args = ["run"]
+     stdin_text = None
+     if recipe_path.strip():
+@@ -325,7 +348,10 @@
+     if not Path(BINARY).is_file():
+         return _finalize(_run(args, timeout=RUN_TIMEOUT, stdin_text=stdin_text))
+     r = jobs.start([BINARY, *args], _env(), stdin_text, RUN_TIMEOUT, dualwrite_tables)
+-    return _finalize(r, dualwrite=dualwrite_tables)
++    result = json.loads(_finalize(r, dualwrite=dualwrite_tables))
++    if resolved_version:
++        result["recipe_version"] = resolved_version
++    return json.dumps(scrub_obj(result), ensure_ascii=False)
+ 
+ 
+ @mcp.tool()
+@@ -453,5 +479,54 @@
+         )
+ 
+ 
++def _library_result(action) -> str:
++    try:
++        data = action(RecipeLibrary(HOME))
++        return json.dumps(scrub_obj(envelope(ok=True, code=ErrorCode.OK, data=data)), ensure_ascii=False)
++    except LibraryError as exc:
++        return json.dumps(envelope(ok=False, code=exc.code, message=str(exc)), ensure_ascii=False)
++    except (ValueError, OSError, TypeError):
++        return json.dumps(envelope(ok=False, code="RECIPE_INVALID_ARGS", message="Invalid library input or JSON"))
++
++
++@mcp.tool()
++def webclaw_recipe_list() -> str:
++    """List all immutable recipe versions plus compatible legacy flat .webclaw files."""
++    return _library_result(lambda lib: {"recipes": lib.list()})
++
++
++@mcp.tool()
++def webclaw_recipe_publish(name: str, recipe: str, tags: list[str] | None = None,
++                           parameters: str = "{}", version: int | None = None) -> str:
++    """Publish/freeze a new immutable version; never overwrite. No secrets allowed.
++
++    parameters: JSON non-secret defaults; bind environment base_url separately.
++    """
++    return _library_result(lambda lib: lib.publish(name, recipe, tags=tags,
++                            parameters=json.loads(parameters), version=version))
++
++
++@mcp.tool()
++def webclaw_recipe_bind_env(name: str, environment: str, parameters: str) -> str:
++    """Bind shared non-secret environment parameters (JSON), without copying recipe bodies.
++
++    Does not change immutable versions or automatically change the navigation allowlist.
++    """
++    return _library_result(lambda lib: lib.bind_env(name, environment, json.loads(parameters)))
++
++
++@mcp.tool()
++def webclaw_recipe_get(reference: str, environment: str = "", parameters: str = "{}") -> str:
++    """Get name@version (or latest name); optional env renders {{base_url}} etc."""
++    return _library_result(lambda lib: lib.get(reference, environment=environment,
++                                               parameters=json.loads(parameters)))
++
++
++@mcp.tool()
++def webclaw_recipe_diff(left: str, right: str) -> str:
++    """Unified diff of two frozen recipe step texts (e.g. name@1, name@2)."""
++    return _library_result(lambda lib: {"diff": lib.diff(left, right)})
++
++
+ if __name__ == "__main__":
+     mcp.run(transport="stdio")
+--- /dev/null
++++ b/webclaw_x/recipe_library.py
+@@ -0,0 +1,289 @@
++"""Immutable local recipe versions + shared non-secret environment bindings.
++
++Linux-only advisory publish locks; no dependency on MCP or Rust at import time.
++"""
++from __future__ import annotations
++import argparse
++import difflib
++import fcntl
++import hashlib
++import json
++import os
++import re
++import shutil
++import tempfile
++from contextlib import contextmanager
++from datetime import datetime
++from pathlib import Path
++from urllib.parse import urlsplit
++from zoneinfo import ZoneInfo
++
++_NAME = re.compile(r'[\w][\w.-]{0,79}\Z', re.UNICODE)
++_PARAM = re.compile(r'[\w][\w.-]{0,79}\Z', re.UNICODE)
++_PLACEHOLDER = re.compile(r'\{\{\s*([\w.-]+)\s*\}\}')
++_SECRET_KEY = re.compile(r'password|passwd|(^|_)pwd($|_)|secret|token|authorization|api[_-]?key|credential|captcha|验证码|密码|(^|_)otp($|_)', re.I)
++_SECRET_LITERAL = re.compile(r'(?:password|passwd|pwd|secret|token|authorization|api[_-]?key|captcha|验证码|密码|\botp)\s*[=:：]', re.I)
++
++class LibraryError(ValueError):
++    def __init__(self, code: str, message: str):
++        super().__init__(message)
++        self.code = code
++
++
++def _fail(code, message):
++    raise LibraryError(code, message)
++
++
++def _name(value: str) -> str:
++    if not isinstance(value, str) or not _NAME.fullmatch(value) or '..' in value:
++        _fail('RECIPE_INVALID_ARGS', 'name must be a short identifier; no path separators or traversal')
++    return value
++
++
++def _secret_check(text: str):
++    if _SECRET_LITERAL.search(text):
++        _fail('RECIPE_SECRET_REJECTED', 'Inline credentials/verification codes are not accepted; use the vault/HITL')
++    for match in re.finditer(r'https?://[^\s，；<>"\']+', text, re.I):
++        try:
++            u = urlsplit(match.group())
++            if u.username is not None or u.password is not None:
++                _fail('RECIPE_SECRET_REJECTED', 'Credentials embedded in URLs are forbidden')
++        except ValueError as exc:
++            if isinstance(exc, LibraryError): raise
++            _fail('RECIPE_INVALID_ARGS', 'Invalid URL in recipe or environment')
++    if any(_SECRET_KEY.search(k) for k in _PLACEHOLDER.findall(text)):
++        _fail('RECIPE_SECRET_REJECTED', 'Secret placeholders are unsupported; use the runtime vault/HITL')
++
++
++def _parameters(value) -> dict[str, str]:
++    if not isinstance(value, dict):
++        _fail('RECIPE_INVALID_ARGS', 'parameters must be a JSON object of strings')
++    result = {}
++    for key, item in value.items():
++        if not isinstance(key, str) or not _PARAM.fullmatch(key):
++            _fail('RECIPE_INVALID_ARGS', 'Invalid parameter name')
++        if _SECRET_KEY.search(key):
++            _fail('RECIPE_SECRET_REJECTED', 'Secret parameter keys are forbidden')
++        if not isinstance(item, str) or any(c in item for c in '\n\r\x00'):
++            _fail('RECIPE_INVALID_ARGS', 'Parameter values must be single-line strings')
++        _secret_check(item)
++        if key == 'base_url':
++            try:
++                u = urlsplit(item)
++                if u.scheme not in ('http', 'https') or not u.hostname or u.username is not None:
++                    _fail('RECIPE_INVALID_ARGS', 'base_url must be an http/https URL without credentials')
++                _ = u.port
++            except ValueError as exc:
++                if isinstance(exc, LibraryError): raise
++                _fail('RECIPE_INVALID_ARGS', 'Invalid base_url')
++        result[key] = item
++    return result
++
++
++def _json(path):
++    try:
++        return json.loads(path.read_text(encoding='utf-8'))
++    except (OSError, ValueError):
++        _fail('RECIPE_INTEGRITY_ERROR', 'Cannot read recipe-library JSON')
++
++
++def _dump(path, value):
++    path.write_text(json.dumps(value, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
++
++
++class RecipeLibrary:
++    def __init__(self, home: str | Path | None = None):
++        self.home = Path(home or os.environ.get('WEBCLAW_HOME') or Path.home()/'.webclaw').resolve()
++        self.root = self.home / 'recipe-library'
++        self.legacy = self.home / 'recipes'
++
++    def _path(self, *parts):
++        path = self.root.joinpath(*parts)
++        if not path.resolve().is_relative_to(self.root.resolve()):
++            _fail('RECIPE_INVALID_ARGS', 'Recipe path escapes library root')
++        return path
++
++    @contextmanager
++    def _lock(self, name):
++        series = self._path(_name(name))
++        series.mkdir(parents=True, exist_ok=True, mode=0o700)
++        fd = os.open(series/'.publish.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
++        with os.fdopen(fd, 'a+') as f:
++            fcntl.flock(f, fcntl.LOCK_EX)
++            yield series
++
++    def _versions(self, name):
++        directory = self._path(_name(name), 'versions')
++        if not directory.is_dir(): return []
++        return sorted(int(p.name) for p in directory.iterdir()
++                      if p.is_dir() and not p.is_symlink() and p.name.isdecimal() and int(p.name) > 0)
++
++    def publish(self, name, recipe, *, tags=None, parameters=None, version=None):
++        name = _name(name)
++        if not isinstance(recipe, str) or not recipe.strip():
++            _fail('RECIPE_INVALID_ARGS', 'Non-empty recipe body required')
++        _secret_check(recipe)
++        params = _parameters(parameters if parameters is not None else {})
++        tags = tags if tags is not None else []
++        if not isinstance(tags, list) or not all(isinstance(t, str) and t and len(t) <= 80 for t in tags):
++            _fail('RECIPE_INVALID_ARGS', 'tags must be a list of short non-empty strings')
++        for tag in tags: _secret_check(tag)
++        body = recipe.strip()+'\n'
++        with self._lock(name) as series:
++            versions = self._versions(name)
++            latest = max(versions, default=0)
++            if version is None or version == '':
++                version = latest+1
++            elif isinstance(version, bool) or not str(version).isdecimal() or int(version) < 1:
++                _fail('RECIPE_INVALID_ARGS', 'Version must be a positive integer')
++            version = int(version)
++            if version in versions:
++                _fail('RECIPE_VERSION_EXISTS', 'Published version is read-only; publish a new version')
++            if version != latest+1:
++                _fail('RECIPE_INVALID_ARGS', 'Version must be the next increasing integer')
++            directory = self._path(name, 'versions')
++            directory.mkdir(exist_ok=True)
++            meta = {
++                'name': name, 'version': version, 'tags': sorted(set(tags)),
++                'read_only': True, 'parameters': params,
++                'placeholders': sorted(set(_PLACEHOLDER.findall(body))),
++                'sha256': hashlib.sha256(body.encode()).hexdigest(),
++                'created_at': datetime.now(ZoneInfo('Asia/Shanghai')).isoformat(),
++            }
++            staging = Path(tempfile.mkdtemp(prefix='.publish-', dir=directory))
++            try:
++                (staging/'recipe.webclaw').write_text(body, encoding='utf-8')
++                _dump(staging/'metadata.json', meta)
++                for file in staging.iterdir(): file.chmod(0o444)
++                os.rename(staging, directory/str(version))
++            finally:
++                if staging.exists(): shutil.rmtree(staging)
++        return meta
++
++    def bind_env(self, name, environment, parameters):
++        name, environment = _name(name), _name(environment)
++        params = _parameters(parameters)
++        with self._lock(name) as series:
++            if not self._versions(name):
++                _fail('RECIPE_NOT_FOUND', 'Publish the recipe before binding environments')
++            target = self._path(name, 'environments.json')
++            bindings = _json(target) if target.exists() else {}
++            if not isinstance(bindings, dict):
++                _fail('RECIPE_INTEGRITY_ERROR', 'Invalid environment bindings')
++            bindings[environment] = params
++            fd, temp_name = tempfile.mkstemp(prefix='.env-', dir=series)
++            try:
++                with os.fdopen(fd, 'w', encoding='utf-8') as f:
++                    json.dump(bindings, f, ensure_ascii=False, indent=2)
++                    f.write('\n')
++                os.replace(temp_name, target)
++            finally:
++                if os.path.exists(temp_name): os.unlink(temp_name)
++        return {'name': name, 'environment': environment, 'parameters': params}
++
++    def get(self, reference, *, environment='', parameters=None, render=False):
++        if not isinstance(reference, str): _fail('RECIPE_INVALID_ARGS', 'reference must be a string')
++        name, sep, version = reference.rpartition('@')
++        if not sep: name, version = reference, ''
++        name = _name(name)
++        versions = self._versions(name)
++        if not version: version = str(max(versions)) if versions else 'legacy'
++        if version == 'legacy':
++            path = self.legacy / f'{name}.webclaw'
++            if not path.resolve().is_relative_to(self.legacy.resolve()) or not path.is_file():
++                _fail('RECIPE_NOT_FOUND', 'Legacy recipe not found')
++            body = path.read_text(encoding='utf-8')
++            meta = {'name': name, 'version': 'legacy', 'tags': [], 'read_only': False, 'parameters': {}}
++            source = 'flat'
++        else:
++            if not version.isdecimal() or int(version) not in versions:
++                _fail('RECIPE_NOT_FOUND', 'Recipe version not found')
++            version = int(version)
++            folder = self._path(name, 'versions', str(version))
++            body_path = self._path(name, 'versions', str(version), 'recipe.webclaw')
++            body = body_path.read_text(encoding='utf-8')
++            meta = _json(self._path(name, 'versions', str(version), 'metadata.json'))
++            if (not isinstance(meta, dict) or meta.get('name') != name or meta.get('version') != version
++                    or meta.get('sha256') != hashlib.sha256(body.encode()).hexdigest()):
++                _fail('RECIPE_INTEGRITY_ERROR', 'Recipe version content/metadata checksum mismatch')
++            source = 'versioned'
++        # Existing flat files stay untouched, but unsafe legacy material is not echoed/run by the new API.
++        _secret_check(body)
++        values = _parameters(meta.get('parameters', {}))
++        env_path = self._path(name, 'environments.json')
++        envs = _json(env_path) if env_path.exists() else {}
++        if not isinstance(envs, dict): _fail('RECIPE_INTEGRITY_ERROR', 'Invalid environments JSON')
++        if environment:
++            environment = _name(environment)
++            if environment not in envs: _fail('RECIPE_ENV_NOT_FOUND', 'Environment binding not found')
++            values.update(_parameters(envs[environment]))
++        values.update(_parameters(parameters if parameters is not None else {}))
++        if render or environment or parameters:
++            missing = sorted(set(_PLACEHOLDER.findall(body))-values.keys())
++            if missing: _fail('RECIPE_MISSING_PARAMS', 'Missing template parameters: '+', '.join(missing))
++            body = _PLACEHOLDER.sub(lambda m: values[m.group(1)], body)
++            _secret_check(body)
++        return {**meta, 'source': source, 'recipe': body, 'environment': environment or None,
++                'environments': sorted(envs),
++                'rendered_sha256': hashlib.sha256(body.encode()).hexdigest() if (render or environment or parameters) else None,
++                'resolved_parameters': values if (render or environment or parameters) else {}}
++
++    def list(self):
++        rows = []
++        if self.root.is_dir():
++            for series in sorted(self.root.iterdir()):
++                if not series.is_dir() or series.is_symlink(): continue
++                name = _name(series.name)
++                env_file = self._path(name, 'environments.json')
++                envs = _json(env_file) if env_file.exists() else {}
++                for version in self._versions(name):
++                    meta = _json(self._path(name, 'versions', str(version), 'metadata.json'))
++                    rows.append({**meta, 'source': 'versioned', 'environments': sorted(envs)})
++        if self.legacy.is_dir():
++            for path in sorted(self.legacy.glob('*.webclaw')):
++                if not path.resolve().is_relative_to(self.legacy.resolve()): continue
++                rows.append({'name': path.stem, 'version': 'legacy', 'tags': [], 'source': 'flat', 'read_only': False})
++        return rows
++
++    def diff(self, left, right):
++        a, b = self.get(left), self.get(right)
++        return ''.join(difflib.unified_diff(a['recipe'].splitlines(keepends=True), b['recipe'].splitlines(keepends=True),
++                                            fromfile=f"{a['name']}@{a['version']}", tofile=f"{b['name']}@{b['version']}"))
++
++
++def main(argv=None):
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument('--home', default=None, help='WEBCLAW_HOME; default ~/.webclaw')
++    sub = parser.add_subparsers(dest='command', required=True)
++    sub.add_parser('list')
++    pub = sub.add_parser('publish', aliases=['freeze'])
++    pub.add_argument('name'); pub.add_argument('--file', required=True)
++    pub.add_argument('--version'); pub.add_argument('--tags', default='')
++    pub.add_argument('--params', default='{}', help='JSON non-secret default parameters')
++    get = sub.add_parser('get'); get.add_argument('reference')
++    get.add_argument('--env', default=''); get.add_argument('--params', default='{}')
++    bind = sub.add_parser('bind-env'); bind.add_argument('name'); bind.add_argument('environment')
++    bind.add_argument('--params', required=True)
++    diff = sub.add_parser('diff'); diff.add_argument('left'); diff.add_argument('right')
++    args = parser.parse_args(argv)
++    lib = RecipeLibrary(args.home)
++    try:
++        if args.command == 'list': result = lib.list()
++        elif args.command in ('publish', 'freeze'):
++            result = lib.publish(args.name, Path(args.file).read_text(encoding='utf-8'),
++                                 tags=[t.strip() for t in args.tags.split(',') if t.strip()],
++                                 parameters=json.loads(args.params), version=args.version)
++        elif args.command == 'get':
++            result = lib.get(args.reference, environment=args.env, parameters=json.loads(args.params))
++        elif args.command == 'bind-env':
++            result = lib.bind_env(args.name, args.environment, json.loads(args.params))
++        else: result = lib.diff(args.left, args.right)
++        print(json.dumps({'ok': True, 'code': 'OK', 'data': result}, ensure_ascii=False, indent=2))
++        return 0
++    except (ValueError, OSError) as exc:
++        print(json.dumps({'ok': False, 'code': getattr(exc, 'code', 'RECIPE_INVALID_ARGS'),
++                          'message': str(exc) if isinstance(exc, LibraryError) else 'Invalid file or JSON input'}, ensure_ascii=False))
++        return 1
++
++if __name__ == '__main__':
++    raise SystemExit(main())
+--- /dev/null
++++ b/tests/test_recipe_library.py
+@@ -0,0 +1,171 @@
++"""Versioned recipes: immutable publish, env templates, legacy compatibility and safe data."""
++import json
++import os
++import subprocess
++import sys
++import threading
++from concurrent.futures import ThreadPoolExecutor
++from functools import partial
++from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
++from pathlib import Path
++
++import pytest
++from webclaw_x.recipe_library import RecipeLibrary, LibraryError
++from webclaw_x import server as gw
++
++BODY1 = '# fuel report\n打开{{base_url}}/table.html，等待1，采集表格'
++BODY2 = '# fuel report\n打开{{base_url}}/table.html，等待2，采集表格'
++
++
++def test_publish_two_versions_list_get_diff(tmp_path):
++    lib = RecipeLibrary(tmp_path)
++    first = lib.publish('fuel', BODY1, tags=['fixture', 'table'])
++    second = lib.publish('fuel', BODY2, tags=['table'])
++    assert (first['version'], second['version']) == (1, 2)
++    assert first['read_only'] and second['read_only']
++    assert [(r['name'], r['version']) for r in lib.list()] == [('fuel', 1), ('fuel', 2)]
++    assert lib.get('fuel@1')['recipe'] == BODY1+'\n'
++    assert lib.get('fuel')['version'] == 2
++    delta = lib.diff('fuel@1', 'fuel@2')
++    assert '-打开{{base_url}}/table.html，等待1' in delta
++    assert '+打开{{base_url}}/table.html，等待2' in delta
++
++
++def test_read_only_publish_and_integrity(tmp_path):
++    lib = RecipeLibrary(tmp_path)
++    lib.publish('fuel', BODY1)
++    with pytest.raises(LibraryError, match='read-only'):
++        lib.publish('fuel', BODY2, version=1)
++    assert lib.get('fuel@1')['recipe'] == BODY1+'\n'
++    file = tmp_path/'recipe-library/fuel/versions/1/recipe.webclaw'
++    assert file.stat().st_mode & 0o222 == 0, 'published snapshot should not be writable accidentally'
++    file.chmod(0o644)
++    file.write_text('等待9')
++    with pytest.raises(LibraryError) as e:
++        lib.get('fuel@1')
++    assert e.value.code == 'RECIPE_INTEGRITY_ERROR'
++
++
++def test_env_binding_no_body_copy_and_precedence(tmp_path):
++    lib = RecipeLibrary(tmp_path)
++    lib.publish('fuel', BODY1, parameters={'base_url':'https://default.example.invalid'})
++    path = tmp_path/'recipe-library/fuel/versions/1/recipe.webclaw'
++    frozen = path.read_bytes()
++    lib.bind_env('fuel', 'fixture', {'base_url':'http://127.0.0.1:8765'})
++    lib.bind_env('fuel', 'mes-test', {'base_url':'https://mes-test.example.invalid'})
++    assert lib.get('fuel@1', environment='fixture')['recipe'].startswith('# fuel report\n打开http://127.0.0.1:8765/')
++    assert 'https://mes-test.example.invalid/table.html' in lib.get('fuel', environment='mes-test')['recipe']
++    assert 'http://localhost:9999/' in lib.get('fuel', environment='fixture', parameters={'base_url':'http://localhost:9999'})['recipe']
++    assert path.read_bytes() == frozen
++    assert len(list((tmp_path/'recipe-library/fuel/versions').glob('*/recipe.webclaw'))) == 1
++
++
++def test_legacy_flat_remains_compatible(tmp_path):
++    flat = tmp_path/'recipes'
++    flat.mkdir()
++    old = flat/'fuel.webclaw'
++    old.write_text('等待1\n')
++    lib = RecipeLibrary(tmp_path)
++    assert lib.get('fuel')['source'] == 'flat'
++    lib.publish('fuel', BODY1)
++    assert lib.get('fuel')['source'] == 'versioned'
++    assert lib.get('fuel@legacy')['recipe'] == '等待1\n'
++    assert {r['version'] for r in lib.list()} == {1, 'legacy'}
++    assert old.read_text() == '等待1\n'
++
++
++@pytest.mark.parametrize('name', ['../escape', '/tmp/x', 'a/b', '.', 'a@1'])
++def test_name_traversal_rejected(tmp_path, name):
++    with pytest.raises(LibraryError):
++        RecipeLibrary(tmp_path).publish(name, '等待1')
++
++
++@pytest.mark.parametrize('body,parameters', [
++    ('输入密码=TEST-PASS', {}),
++    ('打开https://test:FAKE-PASS@host.invalid', {}),
++    ('等待1', {'password':'TEST-PASS'}),
++    ('打开{{base_url}}', {'base_url':'https://host.invalid/?token=TEST-TOKEN'}),
++    ('输入验证码={{captcha}}', {}),
++])
++def test_no_plaintext_secret_published(tmp_path, body, parameters):
++    with pytest.raises(LibraryError) as e:
++        RecipeLibrary(tmp_path).publish('unsafe', body, parameters=parameters)
++    assert e.value.code == 'RECIPE_SECRET_REJECTED'
++    assert not list(tmp_path.rglob('recipe.webclaw'))
++
++
++def test_missing_environment_params_and_invalid_version(tmp_path):
++    lib = RecipeLibrary(tmp_path)
++    lib.publish('fuel', BODY1)
++    for fn, code in [
++        (lambda: lib.get('fuel@99'), 'RECIPE_NOT_FOUND'),
++        (lambda: lib.get('fuel', environment='missing'), 'RECIPE_ENV_NOT_FOUND'),
++        (lambda: lib.get('fuel', render=True), 'RECIPE_MISSING_PARAMS'),
++        (lambda: lib.publish('fuel', BODY1, version='1.2.3'), 'RECIPE_INVALID_ARGS'),
++        (lambda: lib.publish('fuel', BODY1, version=4), 'RECIPE_INVALID_ARGS'),
++        (lambda: lib.bind_env('fuel', 'fixture', {'pwd':'FAKE'}), 'RECIPE_SECRET_REJECTED'),
++    ]:
++        with pytest.raises(LibraryError) as e: fn()
++        assert e.value.code == code
++
++
++def test_concurrent_publish_increments_without_overwrite(tmp_path):
++    lib = RecipeLibrary(tmp_path)
++    with ThreadPoolExecutor(max_workers=4) as pool:
++        versions = list(pool.map(lambda i: lib.publish('concurrent', f'等待{i}')['version'], range(1, 5)))
++    assert sorted(versions) == [1, 2, 3, 4]
++    assert len(lib.list()) == 4
++
++
++def test_cli_publish_freeze_list_get_diff(tmp_path):
++    def cli(*args, ok=True):
++        p = subprocess.run([sys.executable, '-m', 'webclaw_x.recipe_library', '--home', str(tmp_path), *args],
++                           cwd=Path(__file__).resolve().parents[1], text=True, capture_output=True)
++        result = json.loads(p.stdout)
++        assert result['ok'] == ok, result
++        assert (p.returncode == 0) == ok
++        return result['data'] if ok else result
++    file = tmp_path/'input.webclaw'
++    file.write_text(BODY1)
++    assert cli('publish', 'fuel', '--file', str(file), '--tags', 'fixture')['version'] == 1
++    file.write_text(BODY2)
++    assert cli('freeze', 'fuel', '--file', str(file))['version'] == 2
++    assert len(cli('list')) == 2
++    assert cli('get', 'fuel@1')['version'] == 1
++    assert 'fuel@2' in cli('diff', 'fuel@1', 'fuel@2')
++    cli('bind-env', 'fuel', 'fixture', '--params', '{"base_url":"http://localhost:8765"}')
++    assert 'http://localhost:8765/table.html' in cli('get', 'fuel@2', '--env', 'fixture')['recipe']
++
++
++def test_mcp_tools_and_versioned_fixture_replay(tmp_path, monkeypatch):
++    monkeypatch.setattr(gw, 'HOME', tmp_path)
++    monkeypatch.setenv('WEBCLAW_HOME', str(tmp_path))
++    monkeypatch.setenv('WEBCLAW_HEADLESS', '1')
++    monkeypatch.delenv('WEBCLAW_POLICY_FILE', raising=False)
++    monkeypatch.delenv('WEBCLAW_POLICY_ENABLED', raising=False)
++    for folder in ('recipes','runs','bin','jobs'): (tmp_path/folder).mkdir()
++    binary = os.environ.get('WEBCLAW_LITE_BIN', '/home/box/.webclaw/bin/webclaw-lite')
++    assert Path(binary).is_file()
++    monkeypatch.setattr(gw, 'BINARY', binary)
++    assert json.loads(gw.webclaw_recipe_publish('demo', BODY1, tags=['fixture']))['data']['version'] == 1
++    assert json.loads(gw.webclaw_recipe_publish('demo', BODY2))['data']['version'] == 2
++    assert len(json.loads(gw.webclaw_recipe_list())['data']['recipes']) == 2
++    assert json.loads(gw.webclaw_recipe_get('demo@1'))['data']['version'] == 1
++    assert '等待2' in json.loads(gw.webclaw_recipe_diff('demo@1','demo@2'))['data']['diff']
++    site = Path(__file__).resolve().parents[1]/'fixtures/site'
++    httpd = ThreadingHTTPServer(('127.0.0.1',0), partial(SimpleHTTPRequestHandler,directory=str(site)))
++    threading.Thread(target=httpd.serve_forever,daemon=True).start()
++    try:
++        params = json.dumps({'base_url':f'http://127.0.0.1:{httpd.server_port}'})
++        assert json.loads(gw.webclaw_recipe_bind_env('demo','fixture',params))['ok']
++        out = json.loads(gw.webclaw_run(recipe_ref='demo@1', environment='fixture', title='recipe-lib-fixture'))
++        assert out['ok'] and out['done']['success'], out
++        assert out['recipe_version']['version'] == 1
++        assert out['recipe_version']['environment'] == 'fixture'
++        assert list((Path(out['done']['run_dir'])/'documents').glob('*.tables.json'))
++        # Binding a different host does NOT automatically add it to the runtime allowlist.
++        assert json.loads(gw.webclaw_recipe_bind_env('demo','mes-test','{"base_url":"https://mes-test.example.invalid"}'))['ok']
++        denied = json.loads(gw.webclaw_run(recipe_ref='demo@2', environment='mes-test'))
++        assert denied['code'] == 'POLICY_DENIED', denied
++    finally:
++        httpd.shutdown(); httpd.server_close()
+--- /dev/null
++++ b/scripts/eval_recipe_lib.py
+@@ -0,0 +1,27 @@
++#!/usr/bin/env python3
++"""Recipe version/env integration eval -> eval/out/recipe-library.json."""
++import json
++import os
++from pathlib import Path
++import subprocess
++import sys
++from datetime import datetime
++ROOT = Path(__file__).resolve().parents[1]
++OUT = ROOT/'eval/out'
++
++def main():
++    OUT.mkdir(parents=True,exist_ok=True)
++    stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
++    env = os.environ.copy(); env['PYTHONPATH'] = str(ROOT)
++    p = subprocess.run([str(ROOT/'.venv/bin/python'), '-m','pytest','tests/test_recipe_library.py','-v','--tb=short'],
++                       cwd=ROOT, env=env, text=True,capture_output=True,timeout=240)
++    log = (p.stdout or '')+'\n'+(p.stderr or '')
++    (OUT/f'recipe-library-{stamp}.txt').write_text(log)
++    result = {'stamp':stamp,'timezone':'Asia/Shanghai','status':'green' if p.returncode==0 else 'red',
++              'exit_code':p.returncode,'tests':[l.strip() for l in log.splitlines() if '::test_' in l]}
++    (OUT/'recipe-library.json').write_text(json.dumps(result,ensure_ascii=False,indent=2))
++    print(json.dumps(result,ensure_ascii=False,indent=2))
++    print(f'REPORT={OUT/"recipe-library.json"}')
++    return p.returncode
++
++if __name__=='__main__': sys.exit(main())

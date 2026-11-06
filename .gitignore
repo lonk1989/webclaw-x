@@ -1,0 +1,9 @@
+.pytest_cache/
+__pycache__/
+*.pyc
+.venv/
+bin-webclaw-lite
+eval/out/
+**/.publish.lock
+**/.eval-all.lock
+*.log

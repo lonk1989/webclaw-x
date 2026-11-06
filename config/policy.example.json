@@ -1,0 +1,5 @@
+{
+  "enabled": true,
+  "allow_localhost": true,
+  "allowed_hosts": ["example.com"]
+}
