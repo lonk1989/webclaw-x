@@ -1,6 +1,6 @@
 # webclaw-x Skill
 
-确定性中文菜谱浏览器 RPA。通过 MCP 工具调用，不要用 Playwright/CSS 重写。
+确定性菜谱浏览器 RPA（菜谱 = 指令 + 目标/参数；中英动词同源）。通过 MCP 工具调用，不要用 Playwright/CSS 重写。
 
 ## 铁律
 
@@ -27,9 +27,19 @@
 
 ## 示例
 
+中文：
+
 ```
 打开http://127.0.0.1:PORT/table.html，等待2，采集表格
 ```
+
+英文（同一 AST / 回放路径；动词小写）：
+
+```
+open http://127.0.0.1:PORT/table.html, wait 2, collect table
+```
+
+MVP 动词：打开/open、点击/click、等待/wait、输入/type、采集/collect、刷新/reload、截图/screenshot、滚动/scroll、按/press、参数/param。英文粘连合法（如 `openhttps://…`、`wait2`），也可用空格分隔。
 
 不要：`打开…` → probe → 点按钮 → probe → …（复跑期禁止）。
 

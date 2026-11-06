@@ -4,6 +4,8 @@ webclaw **二次改造 P0 + P1** 工程落地仓：硬化 MCP 网关 + L1 契约
 
 上游运行时仍是 MIT 的 [webclaw-oss](https://github.com/lonk1989/webclaw-oss)（`webclaw-lite`）。本仓关系见 [FORK.md](./FORK.md)。
 
+**菜谱语义**：一步 = **指令（verb）** + **目标/参数（args）**；中英动词同一套回放（`打开`/`open`、`等待`/`wait`、`采集`/`collect` …）。示例见 `recipes/fixture-table.webclaw` 与 `recipes/fixture-table.en.webclaw`。
+
 ## 安装
 
 ```bash

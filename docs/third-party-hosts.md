@@ -136,3 +136,14 @@ status 的 `data` 同时含 `bin/chrome/chromeOk/version/product/…` 与诊断�
 - https://neohoy.github.io/workbuddybook/advanced/03-mcp.html  
 - https://cloud.tencent.com/document/product/1831/137039  
 - https://www.wuyingyan.com/articles/use-mcp-connect-ai-to-local-tools  
+
+
+## 英文菜谱验收（Host）
+
+在对话里对完整英文菜谱只调用一次 `webclaw_run`（与中文等价），例如仓库 `recipes/fixture-table.en.webclaw`：
+
+```text
+open http://127.0.0.1:PORT/table.html, wait 2, collect table
+```
+
+禁止拆成逐步 probe。动词小写；`collect table` 与 `采集表格` 同路径。

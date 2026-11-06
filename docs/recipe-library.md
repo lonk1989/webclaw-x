@@ -2,6 +2,8 @@
 
 ## 存储与兼容
 
+菜谱正文支持中英动词（解析期归一到中文 canonical）；库内建议 freeze 后用归一正文便于 diff。
+
 根目录为 `$WEBCLAW_HOME/recipe-library/`（默认 `~/.webclaw/recipe-library/`）：
 
 ```text

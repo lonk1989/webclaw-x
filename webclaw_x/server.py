@@ -51,7 +51,7 @@ PROBE_TIMEOUT = int(os.environ.get("WEBCLAW_PROBE_TIMEOUT_MS", "120000")) / 1000
 DUALWRITE = os.environ.get("WEBCLAW_DUALWRITE", "1") != "0"
 
 INSTRUCTIONS = """\
-webclaw-x：中文菜谱驱动的确定性浏览器 RPA（CDP）。
+webclaw-x：确定性菜谱浏览器 RPA（CDP）。菜谱 = 指令 + 目标/参数；中英动词同源。
 
 【必须遵守】
 1. 完整/冻结菜谱 → 只调用 webclaw_run 一次，禁止拆步逐步 probe。
@@ -395,7 +395,7 @@ async def webclaw_run(
     recipe_ref: str = "",
     environment: str = "",
 ) -> dict:
-    """Execute a Chinese recipe ONCE. Prefer full body; never split frozen recipes into probe steps.
+    """Execute a recipe ONCE (zh/en verbs; same AST). Prefer full body; never split frozen recipes into probe steps.
 
     To stop, Host agents must call webclaw_cancel (allowed concurrently during this run),
     not merely stop the chat/LLM response.
