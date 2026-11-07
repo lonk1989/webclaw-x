@@ -35,3 +35,8 @@
 
 - 旧菜谱依赖「多个确定时点第一个」会开始失败 → 需改成 `#1` 或收紧文案。  
 - 属**有意破坏性**改进，应在 CHANGELOG / Skill 中写明。
+
+
+## 落地状态（2026-11-08 Asia/Shanghai）
+
+已在 webclaw-oss 运行时落地：`parse_click_text_args` 默认 index=0；`locate_global_click_text_once` 多候选返回 `AMBIGUOUS_TARGET`；L1 `test_v03_ambiguous_target` 绿。

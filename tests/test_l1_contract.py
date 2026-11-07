@@ -88,7 +88,7 @@ def test_v02_run_frozen_fixture(http_fixture, webclaw_home: Path):
     if not Path(gw.BINARY).is_file():
         pytest.skip("binary missing")
     recipe = (
-        f"打开{http_fixture}/table.html，等待2，采集表格"
+        f"打开{http_fixture}/table.html，等待文字加油记录5，采集表格"
     )
     # freeze
     fr = _loads(gw.webclaw_freeze(name="fixture-table", recipe=recipe, title="fixture表格"))
@@ -126,7 +126,7 @@ def test_v03_ambiguous_target(http_fixture):
     """
     if not Path(gw.BINARY).is_file():
         pytest.skip("binary missing")
-    recipe = f"打开{http_fixture}/ambiguous.html，等待2，点击确定"
+    recipe = f"打开{http_fixture}/ambiguous.html，等待文字确定5，点击确定"
     out = _loads(asyncio.run(gw.webclaw_run(recipe=recipe, title="V-03 ambiguous")))
     assert out["done"]["raw"]["error_code"] == "AMBIGUOUS_TARGET", out
     code = out.get("code")

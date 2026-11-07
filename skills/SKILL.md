@@ -30,16 +30,18 @@
 中文：
 
 ```
-打开http://127.0.0.1:PORT/table.html，等待2，采集表格
+打开http://127.0.0.1:PORT/table.html，等待文字加油记录5，采集表格
 ```
 
 英文（同一 AST / 回放路径；动词小写）：
 
 ```
-open http://127.0.0.1:PORT/table.html, wait 2, collect table
+open http://127.0.0.1:PORT/table.html, wait 加油记录5, collect table
 ```
 
 MVP 动词：打开/open、点击/click、等待/wait、输入/type、采集/collect、刷新/reload、截图/screenshot、滚动/scroll、按/press、参数/param。英文粘连合法（如 `openhttps://…`、`wait2`），也可用空格分隔。
+
+优先 `等待文字…` / `等待消失…` / `等待下载`，少写固定 `等待N`。画面断言（可选）：`断言画面含 登录`（需 `WEBCLAW_VISION_ASSERT=1`）。多候选点击会返回 `AMBIGUOUS_TARGET`，请加 `#N`。
 
 不要：`打开…` → probe → 点按钮 → probe → …（复跑期禁止）。
 

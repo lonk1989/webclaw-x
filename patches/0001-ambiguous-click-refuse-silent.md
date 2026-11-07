@@ -67,3 +67,8 @@ python scripts/eval_smoke.py
 ## 状态（2026-11-06 Asia/Shanghai）
 
 已应用到 webclaw-oss @ 1dec6c1… 并 `cargo build --release -p webclaw --bin webclaw-lite`（rustc 1.99.1）。二进制已同步到 `~/.webclaw/bin/webclaw-lite`。
+
+
+## 复验（2026-11-08）
+
+`pytest tests/test_l1_contract.py::test_v03_ambiguous_target` PASSED；lite JSONL `error_code=AMBIGUOUS_TARGET`。
