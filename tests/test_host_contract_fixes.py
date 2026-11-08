@@ -117,6 +117,10 @@ def test_both_listing_tools_merge_flat_and_published(gateway):
     assert rows['fixture@legacy']['source'] == 'flat'
     assert rows['fixture@legacy']['path'] == str(flat)
     assert rows['fixture@legacy']['title'] == '旧菜谱'
+    import hashlib
+    raw = before  # bytes before list; content unchanged
+    assert rows['fixture@legacy']['sha256'] == hashlib.sha256(raw).hexdigest()
+    assert rows['fixture@legacy']['bytes'] == len(raw)
     # Legacy Hosts still see CLI JSONL under stdout_tail.
     assert json.loads(old['data']['stdout_tail'])['items'] == list(rows.values())
     assert flat.read_bytes() == before

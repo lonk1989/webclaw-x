@@ -120,7 +120,7 @@ version = status["data"]["version"]
 recipes = json.loads(list_tool_text)["data"]["recipes"]
 ```
 
-status 的 `data` 同时含 `bin/chrome/chromeOk/version/product/…` 与诊断字段 `stderr_tail/exit_code`。`data.stdout_tail`（status 与 list）已 **deprecated**；list 继续保留原来的 `type=recipes, dir, items` 字符串兼容视图，不增加新的重复视图。旧 list 字符串有 8K 截尾上限，完整列表始终读 `data.recipes`。本轮不移除旧字段，便于渐进迁移。
+status 的 `data` 同时含 `bin/chrome/chromeOk/version/product/…` 与诊断字段 `stderr_tail/exit_code`。**字段别混**：`chromeOk` 只表示 Chrome 二进制存在；`cdpReady` 表示调试口可连；是否多实例/孤儿看 `chromeInstances.orphanRisk` 与 `chromeWarn`。`data.stdout_tail`（status 与 list）已 **deprecated**；list 继续保留原来的 `type=recipes, dir, items` 字符串兼容视图，不增加新的重复视图。旧 list 字符串有 8K 截尾上限，完整列表始终读 `data.recipes`。本轮不移除旧字段，便于渐进迁移。flat 菜谱条目现含内容 `sha256`（与 `bytes` 同源一次读），Host 钉内容请用 sha256，勿只信 mtime。
 
 本仓 `scripts/` 无 `call_tool.py`，豆包 skill 的桥接脚本未修改；因此未新增 `--json-only`。桥接端未来可优先输出单份解析后的信封，避免 structured/text 双份打印。
 

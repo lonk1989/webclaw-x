@@ -172,3 +172,36 @@ def test_mcp_tools_and_versioned_fixture_replay(tmp_path, monkeypatch):
         assert denied['done']['raw']['error_code'] == 'POLICY_DENIED'
     finally:
         httpd.shutdown(); httpd.server_close()
+
+def test_flat_list_includes_content_sha256(tmp_path):
+    import hashlib
+    flat = tmp_path / 'recipes'
+    flat.mkdir()
+    body = '# 旧菜谱\n等待{{delay}}\n'
+    (flat / 'fixture.webclaw').write_text(body, encoding='utf-8')
+    lib = RecipeLibrary(tmp_path)
+    rows = {r['id']: r for r in lib.list()}
+    row = rows['fixture@legacy']
+    raw = body.encode('utf-8')
+    assert row['sha256'] == hashlib.sha256(raw).hexdigest()
+    assert row['bytes'] == len(raw)
+    got = lib.get('fixture@legacy')
+    assert got['sha256'] == row['sha256']
+
+
+def test_flat_list_sha256_tracks_content_not_stale_stat(tmp_path):
+    import hashlib, time
+    flat = tmp_path / 'recipes'
+    flat.mkdir()
+    p = flat / 'track.webclaw'
+    p.write_text('等待1\n', encoding='utf-8')
+    lib = RecipeLibrary(tmp_path)
+    first = {r['id']: r for r in lib.list()}['track@legacy']
+    time.sleep(0.02)
+    new_body = '# 更新；点击登录勿解析\n等待2\n'
+    p.write_text(new_body, encoding='utf-8')
+    second = {r['id']: r for r in lib.list()}['track@legacy']
+    assert second['sha256'] == hashlib.sha256(new_body.encode('utf-8')).hexdigest()
+    assert second['sha256'] != first['sha256']
+    assert second['bytes'] == len(new_body.encode('utf-8'))
+

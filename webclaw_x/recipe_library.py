@@ -192,8 +192,14 @@ class RecipeLibrary:
             path = self.legacy / f'{name}.webclaw'
             if not path.resolve().is_relative_to(self.legacy.resolve()) or not path.is_file():
                 _fail('RECIPE_NOT_FOUND', 'Legacy recipe not found')
-            body = path.read_text(encoding='utf-8')
-            meta = {'name': name, 'version': 'legacy', 'tags': [], 'read_only': False, 'parameters': {}}
+            raw = path.read_bytes()
+            body = raw.decode('utf-8-sig')
+            meta = {
+                'name': name, 'version': 'legacy', 'tags': [], 'read_only': False, 'parameters': {},
+                'sha256': hashlib.sha256(raw).hexdigest(),
+                'bytes': len(raw),
+                'path': str(path),
+            }
             source = 'flat'
         else:
             if not version.isdecimal() or int(version) not in versions:
@@ -245,12 +251,15 @@ class RecipeLibrary:
         if self.legacy.is_dir():
             for path in sorted(self.legacy.glob('*.webclaw')):
                 if not path.is_file() or not path.resolve().is_relative_to(self.legacy.resolve()): continue
-                body = path.read_text(encoding='utf-8-sig')
-                stat = path.stat()
+                # One content read: sha256/bytes come from the same bytes Host sees (no stat/read race).
+                raw = path.read_bytes()
+                body = raw.decode('utf-8-sig')
+                mtime_ms = int(path.stat().st_mtime * 1000)
                 first = next((line.strip() for line in body.splitlines() if line.strip()), '')
                 rows.append({'name': path.stem, 'id': f'{path.stem}@legacy',
                              'version': 'legacy', 'tags': [], 'source': 'flat', 'read_only': False,
-                             'path': str(path), 'bytes': stat.st_size, 'mtimeMs': int(stat.st_mtime * 1000),
+                             'path': str(path), 'bytes': len(raw), 'mtimeMs': mtime_ms,
+                             'sha256': hashlib.sha256(raw).hexdigest(),
                              'title': first[1:].strip() if first.startswith('#') else None,
                              'parameters_summary': {'placeholders': sorted(set(_PLACEHOLDER.findall(body))),
                                                     'defaults': []}})

@@ -26,7 +26,7 @@ recipe-library/
 - 发布使用 Linux `flock` + 临时目录原子改名，避免并发丢版。
 - 原 `$WEBCLAW_HOME/recipes/*.webclaw` **保持不变**；旧 `webclaw_freeze` / `recipe_path` 仍可用。
 - `webclaw_list_recipes` 与 `webclaw_recipe_list` 共用 `RecipeLibrary.list()`，合并平铺与全部不可变版本，不依赖 lite 启动。
-- 统一列表在 `data.recipes`；每条有 `name`、`id`（如 `fuel@1`）、`source="library"|"flat"`、`version`、`tags`、`parameters_summary`（占位符名/默认值的键名，不含环境参数值）。旧文件标 `version="legacy"`，保留 `path/title/bytes/mtimeMs`；同名平铺与版本条目不会互相覆盖。
+- 统一列表在 `data.recipes`；每条有 `name`、`id`（如 `fuel@1`）、`source="library"|"flat"`、`version`、`tags`、`parameters_summary`（占位符名/默认值的键名，不含环境参数值）。旧文件标 `version="legacy"`，保留 `path/title/bytes/mtimeMs/sha256`（sha256/bytes 来自同一次内容读取，避免 list 元数据滞后）；同名平铺与版本条目不会互相覆盖。Host 判断「菜谱是否更新」请用 `sha256`，不要只比 bytes/mtime。
 - 旧 `webclaw_list_recipes` 的 `data.stdout_tail` 已 deprecated，仅为旧 Host 保留 `type="recipes"/items` JSONL 兼容视图；大库可能截尾，程序应读完整 `data.recipes`。`get` 的既有 `source="versioned"` 不变。
 - `get fuel`：有新版取最新，无新版回退平铺；`fuel@1` 固定版本；`fuel@legacy` 显式读取旧文件。
 

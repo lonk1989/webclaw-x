@@ -16,7 +16,7 @@
 
 | 工具 | 用途 |
 |------|------|
-| webclaw_status | 健康检查 |
+| webclaw_status | 健康检查（`chromeOk`=Chrome 二进制存在；`cdpReady`=调试口可连；实例唯一性看 `chromeInstances.orphanRisk`/`chromeWarn`） |
 | webclaw_run | 执行完整菜谱 |
 | webclaw_probe | 编排期扫页 |
 | webclaw_freeze | 保存菜谱 |

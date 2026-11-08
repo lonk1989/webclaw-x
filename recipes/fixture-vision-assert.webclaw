@@ -1,2 +1,2 @@
-# Vision assert positive: table page contains 加油记录
+# 画面断言正向：表格页含加油记录；点击类动词出现在注释中也不应成步
 打开http://127.0.0.1:8765/table.html，等待文字加油记录5，断言画面含加油记录
