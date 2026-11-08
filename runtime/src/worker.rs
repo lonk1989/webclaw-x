@@ -882,6 +882,101 @@ pub async fn run_job_file_for_host(path: PathBuf) -> Result<(), String> {
     run_job_file_async(path).await
 }
 
+
+/// In-process recipe run for `webclaw-lite serve` (keeps process-local OCR OnceLock warm).
+pub fn run_recipe_text_blocking(
+    recipe: String,
+    title: String,
+    params: HashMap<String, String>,
+) -> Result<serde_json::Value, String> {
+    ensure_worker_env();
+    let cli = CliArgs {
+        recipe: None,
+        recipe_text: Some(recipe),
+        title,
+        run_id: None,
+        status_only: false,
+        params,
+    };
+
+    struct CollectingSink {
+        events: parking_lot::Mutex<Vec<serde_json::Value>>,
+    }
+    impl run_sink::RunSink for CollectingSink {
+        fn emit(&self, event: RunEvent) {
+            let event = match event {
+                RunEvent::NeedHuman {
+                    kind,
+                    prompt_id,
+                    hint,
+                    image_path,
+                    reply_file,
+                    inbox_image,
+                    image_base64: _,
+                } => RunEvent::NeedHuman {
+                    kind,
+                    prompt_id,
+                    hint,
+                    image_path,
+                    reply_file,
+                    inbox_image,
+                    image_base64: None,
+                },
+                other => other,
+            };
+            if let Ok(v) = serde_json::to_value(&event) {
+                self.events.lock().push(v);
+            }
+        }
+    }
+
+    let sink = Arc::new(CollectingSink {
+        events: parking_lot::Mutex::new(Vec::new()),
+    });
+    run_sink::install_worker_sink(sink.clone());
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    let run_result = rt.block_on(run_recipe_async(cli));
+    let events = sink.events.lock().clone();
+    let done = events
+        .iter()
+        .rev()
+        .find(|e| e.get("type").and_then(|t| t.as_str()) == Some("done"))
+        .cloned();
+    let need_human = events
+        .iter()
+        .rev()
+        .find(|e| e.get("type").and_then(|t| t.as_str()) == Some("need_human"))
+        .cloned();
+    // Keep last ~40 events to bound response size.
+    let start = events.len().saturating_sub(40);
+    let events_tail: Vec<_> = events[start..].to_vec();
+    run_sink::clear_worker_sink();
+
+    match run_result {
+        Ok(()) => Ok(serde_json::json!({
+            "ok": true,
+            "done": done,
+            "need_human": need_human,
+            "events_tail": events_tail,
+        })),
+        Err(e) => {
+            let code = run_sink::error_code(&e);
+            Ok(serde_json::json!({
+                "ok": false,
+                "error": e,
+                "error_code": code,
+                "done": done,
+                "need_human": need_human,
+                "events_tail": events_tail,
+            }))
+        }
+    }
+}
+
 /// CLI 入口（由 `webclaw-worker` 二进制调用）。
 pub fn run_cli() {
     ensure_worker_env();

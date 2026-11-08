@@ -81,7 +81,7 @@ pub fn print_usage() {
   webclaw-lite install
   webclaw-lite status [--run-id <id>]
   webclaw-lite prewarm
-  webclaw-lite serve [--socket <path>]   # 最小 daemon：ping/status/prewarm（run 仍走 CLI）
+  webclaw-lite serve [--socket <path>]   # daemon：ping/status/prewarm/run/cancel（Unix；Windows 未就绪）
   webclaw-lite probe [--url URL] [--types 输入框,按钮,图标按钮,链接] [--search 关键词] [--limit 60]
   webclaw-lite recipe save --name <stem> (--stdin | --file <path>) [--title 标题]
   webclaw-lite recipe list
@@ -395,6 +395,8 @@ fn lite_prewarm() -> Result<(), String> {
 fn lite_serve(socket_path: &std::path::Path) -> Result<(), String> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     ensure_lite_env();
     if socket_path.exists() {
         let _ = std::fs::remove_file(socket_path);
@@ -406,92 +408,239 @@ fn lite_serve(socket_path: &std::path::Path) -> Result<(), String> {
     eprintln!("webclaw-lite serve listening on {}", socket_path.display());
     println!(
         "{}",
-        json!({"type":"serve_started","socket": socket_path.display().to_string()})
+        json!({
+            "type":"serve_started",
+            "socket": socket_path.display().to_string(),
+            "ops": ["ping","status","prewarm","run","cancel","quit"],
+            "phase": 2,
+        })
     );
+
+    let run_busy = Arc::new(Mutex::new(false));
+    let shutting_down = Arc::new(AtomicBool::new(false));
+
     for conn in listener.incoming() {
-        let mut stream = match conn {
+        if shutting_down.load(Ordering::SeqCst) {
+            break;
+        }
+        let stream = match conn {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("serve accept: {e}");
                 continue;
             }
         };
-        let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
-        let mut line = String::new();
-        if reader.read_line(&mut line).is_err() {
-            continue;
-        }
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let req: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(e) => {
-                let _ = writeln!(
-                    stream,
-                    "{}",
-                    json!({"ok":false,"error": format!("bad json: {e}")})
-                );
-                continue;
+        let run_busy = run_busy.clone();
+        let shutting_down = shutting_down.clone();
+        let sock_path = socket_path.to_path_buf();
+        std::thread::spawn(move || {
+            if let Err(e) = handle_serve_conn(stream, run_busy, shutting_down) {
+                eprintln!("serve conn: {e}");
             }
-        };
-        let op = req.get("op").and_then(|v| v.as_str()).unwrap_or("");
-        let resp = match op {
-            "ping" => json!({"ok": true, "op": "ping", "product": "webclaw-lite", "version": product_version()}),
-            "status" => {
-                // Reuse blocking status builder into a Value (capture stdout is awkward);
-                // call the same probe path inline.
-                let home = std::env::var("WEBCLAW_HOME").unwrap_or_default();
-                let chrome = std::env::var("WEBCLAW_CHROME").unwrap_or_default();
-                let chrome_bin_ok = !chrome.is_empty() && Path::new(&chrome).is_file();
-                let bin = std::env::current_exe()
-                    .ok()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default();
-                let port = crate::chrome::worker_cdp_port();
-                let cdp_ready = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .ok()
-                    .map(|rt| rt.block_on(crate::chrome::is_debug_port_ready_on(port)))
-                    .unwrap_or(false);
-                let chrome_inspect = crate::chrome::inspect_chrome_on_port(port, cdp_ready);
-                json!({
-                    "ok": true,
-                    "op": "status",
-                    "status": {
-                        "type": "status",
-                        "product": "webclaw-lite",
-                        "version": product_version(),
-                        "home": home,
-                        "bin": bin,
-                        "chrome": if chrome.is_empty() { serde_json::Value::Null } else { json!(chrome) },
-                        "chromeOk": chrome_bin_ok,
-                        "cdpPort": port,
-                        "cdpReady": cdp_ready,
-                        "chromeInstances": chrome_inspect,
-                        "statusSource": "lite_serve",
-                    }
-                })
-            }
-            "prewarm" => match lite_prewarm_value() {
-                Ok(v) => json!({"ok": true, "op": "prewarm", "result": v}),
-                Err(e) => json!({"ok": false, "op": "prewarm", "error": e}),
-            },
-            "quit" | "exit" => {
-                let _ = writeln!(stream, "{}", json!({"ok": true, "op": "quit"}));
-                break;
-            }
-            other => json!({
-                "ok": false,
-                "error": format!("unsupported op '{other}' (phase-1 serve: ping|status|prewarm|quit; run still CLI)"),
-            }),
-        };
-        let _ = writeln!(stream, "{resp}");
+            let _ = sock_path;
+        });
     }
     let _ = std::fs::remove_file(socket_path);
     Ok(())
+}
+
+#[cfg(unix)]
+fn handle_serve_conn(
+    mut stream: std::os::unix::net::UnixStream,
+    run_busy: std::sync::Arc<std::sync::Mutex<bool>>,
+    shutting_down: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<(), String> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::sync::atomic::Ordering;
+    let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
+    let mut line = String::new();
+    if reader.read_line(&mut line).is_err() {
+        return Ok(());
+    }
+    let line = line.trim();
+    if line.is_empty() {
+        return Ok(());
+    }
+    let req: serde_json::Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(
+                stream,
+                "{}",
+                json!({"ok":false,"error": format!("bad json: {e}")})
+            );
+            return Ok(());
+        }
+    };
+    let op = req.get("op").and_then(|v| v.as_str()).unwrap_or("");
+    let resp = match op {
+        "ping" => json!({"ok": true, "op": "ping", "product": "webclaw-lite", "version": product_version()}),
+        "status" => serve_status_value(),
+        "prewarm" => match lite_prewarm_value() {
+            Ok(v) => json!({"ok": true, "op": "prewarm", "result": v}),
+            Err(e) => json!({"ok": false, "op": "prewarm", "error": e}),
+        },
+        "cancel" => match request_cancel() {
+            Ok(flag) => json!({
+                "ok": true,
+                "op": "cancel",
+                "path": flag.display().to_string(),
+            }),
+            Err(e) => json!({"ok": false, "op": "cancel", "error": e}),
+        },
+        "run" => {
+            {
+                let mut guard = run_busy.lock().map_err(|e| e.to_string())?;
+                if *guard {
+                    return write_serve_resp(
+                        &mut stream,
+                        json!({
+                            "ok": false,
+                            "op": "run",
+                            "error_code": "RUN_BUSY",
+                            "error": "serve already has an active run",
+                        }),
+                    );
+                }
+                *guard = true;
+            }
+
+            let recipe = req
+                .get("recipe")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let recipe_path = req
+                .get("recipe_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let title = req
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("serve-run")
+                .to_string();
+            let params = match req.get("params") {
+                None | Some(serde_json::Value::Null) => std::collections::HashMap::new(),
+                Some(serde_json::Value::String(s)) => match serde_json::from_str::<serde_json::Value>(s) {
+                    Ok(serde_json::Value::Object(map)) => map
+                        .into_iter()
+                        .map(|(k, v)| {
+                            (
+                                k,
+                                match v {
+                                    serde_json::Value::String(s) => s,
+                                    other => other.to_string(),
+                                },
+                            )
+                        })
+                        .collect(),
+                    _ => std::collections::HashMap::new(),
+                },
+                Some(serde_json::Value::Object(map)) => map
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            match v {
+                                serde_json::Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            },
+                        )
+                    })
+                    .collect(),
+                Some(_) => std::collections::HashMap::new(),
+            };
+
+            let body = if !recipe.trim().is_empty() {
+                Ok(recipe)
+            } else if !recipe_path.trim().is_empty() {
+                std::fs::read_to_string(recipe_path.trim()).map_err(|e| e.to_string())
+            } else {
+                Err("provide recipe or recipe_path".into())
+            };
+
+            let result = match body {
+                Ok(text) => crate::worker::run_recipe_text_blocking(text, title, params),
+                Err(e) => Ok(json!({"ok": false, "error": e, "error_code": "INVALID_ARGS"})),
+            };
+
+            if let Ok(mut g) = run_busy.lock() {
+                *g = false;
+            }
+
+            match result {
+                Ok(v) => {
+                    let mut out = v;
+                    if let Some(obj) = out.as_object_mut() {
+                        obj.insert("op".into(), json!("run"));
+                    }
+                    out
+                }
+                Err(e) => json!({"ok": false, "op": "run", "error": e}),
+            }
+        }
+        "quit" | "exit" => {
+            shutting_down.store(true, Ordering::SeqCst);
+            let _ = request_cancel();
+            let _ = write_serve_resp(&mut stream, json!({"ok": true, "op": "quit"}));
+            // Unblock accept loop / stop daemon process.
+            std::process::exit(0);
+        }
+        other => json!({
+            "ok": false,
+            "error": format!(
+                "unsupported op '{other}' (phase-2 serve: ping|status|prewarm|run|cancel|quit)"
+            ),
+        }),
+    };
+    write_serve_resp(&mut stream, resp)
+}
+
+#[cfg(unix)]
+fn write_serve_resp(
+    stream: &mut std::os::unix::net::UnixStream,
+    resp: serde_json::Value,
+) -> Result<(), String> {
+    use std::io::Write;
+    let _ = writeln!(stream, "{resp}");
+    Ok(())
+}
+
+#[cfg(unix)]
+fn serve_status_value() -> serde_json::Value {
+    let home = std::env::var("WEBCLAW_HOME").unwrap_or_default();
+    let chrome = std::env::var("WEBCLAW_CHROME").unwrap_or_default();
+    let chrome_bin_ok = !chrome.is_empty() && Path::new(&chrome).is_file();
+    let bin = std::env::current_exe()
+        .ok()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let port = crate::chrome::worker_cdp_port();
+    let cdp_ready = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()
+        .map(|rt| rt.block_on(crate::chrome::is_debug_port_ready_on(port)))
+        .unwrap_or(false);
+    let chrome_inspect = crate::chrome::inspect_chrome_on_port(port, cdp_ready);
+    json!({
+        "ok": true,
+        "op": "status",
+        "status": {
+            "type": "status",
+            "product": "webclaw-lite",
+            "version": product_version(),
+            "home": home,
+            "bin": bin,
+            "chrome": if chrome.is_empty() { serde_json::Value::Null } else { json!(chrome) },
+            "chromeOk": chrome_bin_ok,
+            "cdpPort": port,
+            "cdpReady": cdp_ready,
+            "chromeInstances": chrome_inspect,
+            "statusSource": "lite_serve",
+        }
+    })
 }
 
 fn lite_prewarm_value() -> Result<serde_json::Value, String> {

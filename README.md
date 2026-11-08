@@ -6,30 +6,43 @@ webclaw **二次改造** 主仓（monorepo）：硬化 MCP 网关 + 内嵌 Rust 
 
 **菜谱语义**：一步 = **指令（verb）** + **目标/参数（args）**；中英动词同一套回放（`打开`/`open`、`等待`/`wait`、`采集`/`collect` …）。示例见 `recipes/fixture-table.webclaw` 与 `recipes/fixture-table.en.webclaw`。
 
-## 安装
+## 安装（终端用户默认：预编译）
+
+**不要**一上来 `cargo build`。预编译 `webclaw-lite` 约 **61MB**；从源码编译会在本机留下数 GB 级的 `target/`，只适合改引擎的人。
 
 ```bash
-cd /workspace/webclaw-x
+cd /path/to/webclaw-x
 
-# 1) 从本仓编译 runtime（推荐）
+# 一键：拉预编译 lite → venv/mcp → 写出 mcp.json 片段
+./scripts/install_webclaw.sh
+# 可选业务域名草稿（不会自动放行全世界）：
+# ./scripts/install_webclaw.sh --hosts 'app.example.com,login.example.com'
+
+# 片段在 $WEBCLAW_HOME/mcp/（默认 ~/.webclaw/mcp/）
+# 拷进 Cursor / WorkBuddy 的 mcp.json 后重连并信任工具
+```
+
+仅下载 lite：`skills/webclaw-lite/scripts/install.sh`（或 Windows `install.ps1`）。  
+macOS Gatekeeper：`xattr -d com.apple.quarantine ~/.webclaw/bin/webclaw-lite`。
+
+手工接通时：
+
+```bash
+export PYTHONPATH=/path/to/webclaw-x
+export WEBCLAW_LITE_BIN=$HOME/.webclaw/bin/webclaw-lite
+export WEBCLAW_HOME=$HOME/.webclaw
+export WEBCLAW_TOOLS=core          # 默认；完整工具面设 all
+export WEBCLAW_HEADLESS=1          # 无头冒烟；演示可改 0
+PYTHONPATH=. .venv/bin/python -m webclaw_x.server
+```
+
+二进制查找顺序：`WEBCLAW_LITE_BIN` → 仓内 `target/release` → `bin-webclaw-lite` → `~/.webclaw/bin`。
+
+### 附录：开发者从源码编 lite
+
+```bash
 export PATH="$HOME/.cargo/bin:$PATH"
-./scripts/build_runtime.sh
-# 产物：./target/release/webclaw-lite ，并安装到 ~/.webclaw/bin/webclaw-lite
-# 查找顺序：WEBCLAW_LITE_BIN → 仓内 target/release → bin-webclaw-lite → ~/.webclaw/bin → 旧 oss 路径
-
-# 若已有二进制，也可直接：
-#   ls target/release/webclaw-lite || ls ~/.webclaw/bin/webclaw-lite \
-#     || ls /workspace/webclaw-oss/target/release/webclaw-lite
-
-# 2) Python 依赖（复用已有 venv 或新建）
-# 默认 .venv → /workspace/webclaw-mcp/.venv（含 mcp）
-# 若需独立：
-#   python3 -m venv .venv && .venv/bin/pip install mcp pytest
-
-export PYTHONPATH=/workspace/webclaw-x
-# 一般无需手设；需要钉死路径时：
-# export WEBCLAW_LITE_BIN=$HOME/.webclaw/bin/webclaw-lite
-export WEBCLAW_HEADLESS=1   # 无头冒烟；演示可改 0
+./scripts/build_runtime.sh   # → ~/.webclaw/bin/webclaw-lite，并产生巨大 target/
 ```
 
 ### 首载约定（Agent / 第三方 Host）
@@ -38,6 +51,11 @@ export WEBCLAW_HEADLESS=1   # 无头冒烟；演示可改 0
 - **status 热路径**：默认不 spawn lite（`WEBCLAW_STATUS_MODE=fast`）；`WEBCLAW_STATUS_MODE=lite` 才走 CLI
 - **可选预热**：`WEBCLAW_PREWARM=1` 在网关启动时后台确保 CDP 就绪
 - Skill 与 MCP instructions 共用 `webclaw_x/fast_card.py` 一张快卡，勿叠读 lite/伙伴 Skill 全文
+- **工具面**：默认 `WEBCLAW_TOOLS=core`（约 7 个）；`WEBCLAW_TOOLS=all` 暴露完整目录（含 recipe_* / accounts / policy_draft 等）
+- **新助手入口**：只读 [`skills/SKILL.md`](./skills/SKILL.md)（含真业务 checklist）
+- **policy 草稿**：`python scripts/policy_draft.py --hosts '…' --out $WEBCLAW_HOME/policy.json.draft`（审阅后才改名 `policy.json`）
+- **登录态**：默认复用健康 CDP；`WEBCLAW_PREWARM=1` 可选预热；`WEBCLAW_CHROME_RECYCLE=1` 才强制冷启
+- **lite serve**（Unix）：`webclaw-lite serve` 支持 ping/status/prewarm/**run/cancel**；OCR 模型在同进程二次 run 可复用；Windows serve 未就绪
 
 ### 启动 MCP（stdio）
 

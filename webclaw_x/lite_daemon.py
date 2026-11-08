@@ -1,6 +1,9 @@
-"""Minimal client for `webclaw-lite serve` (phase-1: ping/status/prewarm).
+"""Client for `webclaw-lite serve` (phase-2: ping/status/prewarm/run/cancel).
 
-Run still uses subprocess CLI. Set WEBCLAW_LITE_SOCKET or default ~/.webclaw/lite.sock.
+Host MCP still defaults to subprocess CLI for run (jobs + cancel contract).
+This client is for local daemon experiments and future Host opt-in.
+Set WEBCLAW_LITE_SOCKET or default ~/.webclaw/lite.sock.
+Windows: serve not ready.
 """
 
 from __future__ import annotations
@@ -25,6 +28,9 @@ def call(op: str, timeout: float = 5.0, **extra) -> dict | None:
     if not path.exists():
         return None
     payload = {"op": op, **extra}
+    # run may take minutes; allow override via timeout arg
+    if op == "run" and timeout < 60:
+        timeout = float(os.environ.get("WEBCLAW_RUN_TIMEOUT_MS", "600000")) / 1000.0
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
             sock.settimeout(timeout)

@@ -1,70 +1,77 @@
-# webclaw-x Skill
+# webclaw-x · 新助手 1 页上手
 
-> 与 MCP `instructions` 共用同一张快卡（`webclaw_x/fast_card.py`）。**不要**再叠读 `skills/webclaw-lite/SKILL.md` 全文，除非走伙伴远程路径。
+> **只读本页。** 勿叠读 `skills/webclaw-lite/`、`skills/webclaw/`（伙伴远程）全文——那些不是 MCP 主路径。  
+> 与 MCP `instructions` 共用快卡 `webclaw_x/fast_card.py`。
 
-确定性菜谱浏览器 RPA（菜谱 = 指令 + 目标/参数；中英动词同源）。通过 MCP 工具调用，不要用 Playwright/CSS 重写。
+确定性菜谱浏览器 RPA。菜谱 = **指令 + 目标/参数**；中英动词同源。经 MCP 调用，禁止 Playwright/CSS 重写。
 
-## 首载（Host 必读）
+## 0. 发现 → 安装 → 接通（人/部署者）
 
-1. **常驻 MCP stdio**：一个会话只拉起一次 `python -m webclaw_x.server`，禁止每个工具 respawn（评测桥请用 `scripts/call_tool.py --persist`）。
-2. **status 热路径**：默认不 spawn lite；`chromeOk`=二进制存在，`cdpReady`=调试口可连，实例看 `chromeInstances`。深度 HITL 字段才设 `WEBCLAW_STATUS_MODE=lite`。
-3. **可选预热**：`WEBCLAW_PREWARM=1` 在网关启动时后台拉起/复用 Chrome（默认关，不改语义）。
-4. 首轮 `status`∥`list_recipes` 各一次即可；勿 status×3。
+```bash
+# 默认：预编译 lite（~61MB），不要 cargo
+./scripts/install_webclaw.sh
+# 产出：$WEBCLAW_HOME/bin/webclaw-lite  +  $WEBCLAW_HOME/mcp/*.mcp.json
+# 把 mcp 片段拷进 Cursor / WorkBuddy，重连并信任工具
+```
 
-## 铁律
+- 仅当**改引擎源码**才用 `./scripts/build_runtime.sh`（会生成巨大 `target/`，终端用户勿走）。
+- 默认 `WEBCLAW_TOOLS=core` → list_tools 只暴露 **core7**；完整工具设 `WEBCLAW_TOOLS=all`。
+- **常驻 stdio**：一会话只拉起一次网关；禁止每工具 respawn（评测：`scripts/call_tool.py --persist …`）。
+
+## 1. 掌握（会话内，分钟级）
+
+1. `webclaw_status`∥`webclaw_list_recipes` 各一次（status 热路径，勿×3）
+2. 跑 fixture：`webclaw_run` 一次完整菜谱（见 `recipes/fixture-table.webclaw`）
+3. 墙钟参考（已装好）：就绪 ~0.4s；CLI fixture ~2.7s
+
+**core7**：`status` / `run` / `probe` / `freeze` / `list_recipes` / `human_reply` / `cancel`
+
+## 2. 铁律
 
 1. **完整/冻结菜谱 → 只 `webclaw_run` 一次。禁止逐步 probe。**
-2. `webclaw_probe` 仅编排期写菜谱；写完 `webclaw_freeze`，复跑只用 run。
-3. 密码/验证码永不进菜谱或聊天；HITL 用 `webclaw_human_reply`。
-4. 若返回 `AMBIGUOUS_TARGET`：展示可读候选（旁文案/坐标），让用户选 `#N`（同文案后加，如 `点击确定#1`），禁止猜点。
-5. 优先 `recipe_path` 指向已冻结 `.webclaw`。
-6. 菜谱含 `{{参数}}`，须先让用户确认非秘密参数，再传 `params_confirmed=true`；网关未确认会返回 `PARAMS_UNCONFIRMED` 和参数名，不启动 lite。环境绑定/默认值也不能替代用户确认。
-7. 发现菜谱读 `webclaw_list_recipes` 的 `data.recipes`，平铺和版本库统一列出；用 `id` 固定 `recipe_ref`，不要猜文件路径。
+2. `probe` 仅编排期；写完 `freeze`，复跑只用 run。
+3. 密码/验证码不进菜谱/聊天；HITL 用 `webclaw_human_reply`；密码走 accounts 金库。
+4. `AMBIGUOUS_TARGET` → 展示候选，让用户选 `#N`（如 `点击确定#1`），禁止猜点。
+5. 含 `{{参数}}` → 先问用户确认 → `params_confirmed=true`；否则 `PARAMS_UNCONFIRMED`。
+6. 长停必须调 `webclaw_cancel`（Host UI Stop 同理）；空闲 cancel → `NO_ACTIVE_RUN`。
 
-## 工具
+## 3. 真业务 checklist（开跑前勾完）
 
-| 工具 | 用途 |
-|------|------|
-| webclaw_status | 健康检查（热路径；`chromeOk`/`cdpReady`/`chromeInstances`） |
-| webclaw_run | 执行完整菜谱 |
-| webclaw_probe | 编排期扫页 |
-| webclaw_freeze | 保存菜谱 |
-| webclaw_list_recipes | 列出库 |
-| webclaw_human_reply | 验证码/确认 |
-| webclaw_cancel | 停跑 |
-| webclaw_dualwrite_run | 补写 JSON/CSV |
+- [ ] **policy**：业务 host 已写入 `$WEBCLAW_HOME/policy.json` 的 `allowed_hosts`  
+      草稿：`python scripts/policy_draft.py --hosts 'app.example.com' --out $WEBCLAW_HOME/policy.json.draft`  
+      → 部署者审阅后改名为 `policy.json`。**禁止**自动设 `WEBCLAW_POLICY_ENABLED=0`。
+- [ ] **params_confirmed**：非秘密 `{{…}}` 已由用户确认。
+- [ ] **HITL / 登录**：验证码与确认等人；不猜码。需要登录态时复用 Chrome profile（见下）。
+- [ ] **cancel**：Host Stop = 真调 `webclaw_cancel`，防 `RUN_BUSY` 残留。
+- [ ] **禁逐步 probe**：回放路径只 `webclaw_run` 一次；新站点先 probe→freeze→publish，再 run。
 
-## 示例
+### 登录 profile 复用
 
-中文：
+- 健康 CDP **默认复用**同一调试 Chrome（Cookie/登录态可保留）。
+- 可选 `WEBCLAW_PREWARM=1`：网关启动时后台确保 CDP 就绪。
+- 仅当必须冷启动时设 `WEBCLAW_CHROME_RECYCLE=1`（杀端口再启，登录态可能丢）。
+- Profile 目录在应用数据下的 `chrome-debug` / `chrome-profiles/<task>`；同 `WEBCLAW_HOME` 会话间复用，勿每跑清 profile。
+
+## 4. 示例
 
 ```
 打开http://127.0.0.1:PORT/table.html，等待文字加油记录5，采集表格
 ```
 
-英文（同一 AST / 回放路径；动词小写）：
-
 ```
 open http://127.0.0.1:PORT/table.html, wait 加油记录5, collect table
 ```
 
-MVP 动词：打开/open、点击/click、等待/wait、输入/type、采集/collect、刷新/reload、截图/screenshot、滚动/scroll、按/press、参数/param。英文粘连合法（如 `openhttps://…`、`wait2`），也可用空格分隔。
+MVP：打开/open、点击/click、等待/wait、输入/type、采集/collect、刷新/reload、截图/screenshot、滚动/scroll、按/press、参数/param。
 
-优先 `等待文字…` / `等待消失…` / `等待下载`，少写固定 `等待N`。画面断言（可选）：`断言画面含 登录`（需 `WEBCLAW_VISION_ASSERT=1`）。多候选点击会返回 `AMBIGUOUS_TARGET` 与可读候选（旁文案/坐标）；请在同文案后加 `#N`（如 `点击确定#1`）。
+## 5. 出错时
 
-不要：`打开…` → probe → 点按钮 → probe → …（复跑期禁止）。
+| 码 | 动作 |
+|----|------|
+| `POLICY_DENIED` | 停；找部署者改 `allowed_hosts`（可用 policy_draft） |
+| `NEED_HUMAN` | 展示提示；`webclaw_human_reply(run_id, prompt_id, …)` |
+| `PARAMS_UNCONFIRMED` | 问用户后重跑并带 `params_confirmed=true` |
+| `RUN_BUSY` | 先 cancel/结束原任务 |
+| `NO_ACTIVE_RUN` / `NO_ACTIVE_HUMAN` | 勿重放归档 |
 
-## P1 Policy / HITL
-
-- `POLICY_DENIED`：停止，不自动设置 `WEBCLAW_POLICY_ENABLED=0`；请部署者审阅具体 host。
-- `NEED_HUMAN`：展示提示并等人的回复；用返回的 `run_id` 与 `need_human.prompt_id` 调 `webclaw_human_reply` 续跑。
-- 禁止自动猜验证码或凭空确认人的操作；`NO_ACTIVE_HUMAN` 不得向归档文件重放回复。
-- 同网关只有一个活跃运行；遇 `RUN_BUSY` 先结束/回复原任务。
-
-## P1 Self-Heal
-
-- 默认关闭；由部署者审阅 `heal.json` 显式启用，短重试/刷新只针对失败的只读单步。
-- `NEED_REPAIR`：停止并审阅失败，不得为了自愈重跑整份菜谱，不得静默猜位置/AI 改写。
-- 自愈触发 `NEED_HUMAN` 时按页面修复提示等人完成，再用原 run_id/prompt_id 续跑；不能虚构确认。
-- `HEAL_CONFIG_INVALID`：交部署者修配置，不自动禁用白名单。AI hook 当前未实现、调用数为 0。
-- 详见 `docs/self-heal.md`。
+进阶（按需再打开）：`docs/third-party-hosts.md`、`docs/policy-and-hitl.md`、`docs/recipe-library.md`、`docs/self-heal.md`。

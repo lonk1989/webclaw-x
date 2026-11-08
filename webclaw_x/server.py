@@ -44,6 +44,8 @@ DUALWRITE = os.environ.get("WEBCLAW_DUALWRITE", "1") != "0"
 from webclaw_x.fast_card import FAST_CARD  # noqa: E402
 from webclaw_x import status_fast  # noqa: E402
 from webclaw_x.prewarm import maybe_start_background  # noqa: E402
+from webclaw_x.tools_mode import apply_tool_visibility, tools_mode  # noqa: E402
+from webclaw_x.policy_draft import draft_policy  # noqa: E402
 
 # Single fast-card (deduped vs skills/SKILL.md). Do not re-expand here.
 INSTRUCTIONS = FAST_CARD
@@ -732,6 +734,29 @@ def webclaw_recipe_diff(left: str, right: str) -> dict:
     """Unified diff of two frozen recipe step texts (e.g. name@1, name@2)."""
     return _library_result(lambda lib: {"diff": lib.diff(left, right)})
 
+
+
+@mcp.tool()
+def webclaw_policy_draft(hosts: str, allow_localhost: bool = True) -> dict:
+    """Draft policy.json content from pasted hosts/URLs. Does NOT write or disable policy.
+
+    Deployer must review and copy to $WEBCLAW_HOME/policy.json. Exact host match only.
+    Available when WEBCLAW_TOOLS=all (or via scripts/policy_draft.py).
+    """
+    if not (hosts or "").strip():
+        return scrub_obj(envelope(ok=False, code=ErrorCode.INVALID_ARGS, message="hosts required"))
+    draft = draft_policy(hosts, allow_localhost=allow_localhost)
+    return scrub_obj(envelope(
+        ok=True,
+        code=ErrorCode.OK,
+        message="Draft only — review then copy to $WEBCLAW_HOME/policy.json; never auto-disable policy",
+        data={"draft": draft, "hint": "scripts/policy_draft.py --hosts '…' --out $WEBCLAW_HOME/policy.json.draft"},
+    ))
+
+
+
+# Default list_tools surface = core7; set WEBCLAW_TOOLS=all for full catalog.
+_TOOLS_MODE = apply_tool_visibility(mcp)
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")

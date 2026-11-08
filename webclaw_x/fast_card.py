@@ -18,8 +18,10 @@ webclaw-x：确定性菜谱浏览器 RPA（CDP）。菜谱=指令+目标/参数�
 5. {{参数}} 须用户确认后 params_confirmed=true；否则 PARAMS_UNCONFIRMED。
 6. 长停调 webclaw_cancel（可并行）；POLICY_DENIED/NEED_REPAIR/HEAL_CONFIG_INVALID 交部署者，禁止自动关策略或整份重跑。
 
-【核心工具】status / run / probe / freeze / list_recipes / human_reply / cancel
-【首载】Host 必须常驻 MCP stdio（禁止每工具 respawn）。status 默认热路径不进 lite。可选 WEBCLAW_PREWARM=1 预热 Chrome。
+【核心工具 core7】status / run / probe / freeze / list_recipes / human_reply / cancel
+默认 WEBCLAW_TOOLS=core；完整工具 WEBCLAW_TOOLS=all。
+【首载】常驻 MCP stdio（禁每工具 respawn）。status 热路径。可选 WEBCLAW_PREWARM=1。
+真业务前：policy allowed_hosts、params_confirmed、HITL、cancel、禁逐步 probe。登录态默认复用 CDP；WEBCLAW_CHROME_RECYCLE=1 才强制冷启。
 """
 
 __all__ = ["FAST_CARD"]

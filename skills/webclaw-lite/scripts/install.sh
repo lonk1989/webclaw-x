@@ -38,3 +38,4 @@ export WEBCLAW_HOME="$HOME_DIR"
 "$DEST" status
 echo "[webclaw-lite] installed -> $DEST"
 echo "[webclaw-lite] tip: if macOS Gatekeeper blocks the binary: xattr -d com.apple.quarantine \"$DEST\""
+echo "[webclaw-lite] tip: full MCP onboarding → repo scripts/install_webclaw.sh (venv + mcp.json)"

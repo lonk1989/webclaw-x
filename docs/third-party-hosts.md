@@ -23,6 +23,11 @@
 - 评测脚本请用：`python scripts/call_tool.py --persist webclaw_status '{}' webclaw_list_recipes '{}'`
 - `webclaw_status` 默认 **Host 热路径**（不进 lite）；深度 HITL 才设 `WEBCLAW_STATUS_MODE=lite`
 - 可选 `WEBCLAW_PREWARM=1`：网关启动时后台预热 Chrome（默认关）
+- 默认 `WEBCLAW_TOOLS=core`（list_tools ≈7）；完整目录设 `WEBCLAW_TOOLS=all`
+- 安装：优先 `./scripts/install_webclaw.sh`（预编译 + 写出 `$WEBCLAW_HOME/mcp/*.mcp.json`），勿默认 cargo
+- policy 草稿：`python scripts/policy_draft.py --hosts 'app.example.com' --out $WEBCLAW_HOME/policy.json.draft`（审阅后才启用）
+- 登录态：健康 CDP 默认复用；`WEBCLAW_CHROME_RECYCLE=1` 才强制冷启。可选与 `WEBCLAW_PREWARM=1` 搭配
+- `webclaw-lite serve`（**Unix only**）：phase-2 支持 `run`/`cancel` 常驻；OCR OnceLock 同进程复用。Host 网关默认仍走 CLI run；Windows serve 未就绪
 
 `chromeOk` = Chrome 二进制存在；`cdpReady` = 调试口可连；多实例/孤儿看 `chromeInstances.orphanRisk` / `chromeWarn`。
 

@@ -23,6 +23,16 @@
 
 示例文件：`config/policy.example.json`。复制到自己的 `$WEBCLAW_HOME/policy.json` 前应审阅 host 列表。
 
+### 草稿向导（不自动放行）
+
+```bash
+python scripts/policy_draft.py --hosts 'app.example.com,login.example.com' \
+  --out "$WEBCLAW_HOME/policy.json.draft"
+# 审阅后：cp "$WEBCLAW_HOME/policy.json.draft" "$WEBCLAW_HOME/policy.json"
+```
+
+安装脚本也可：`./scripts/install_webclaw.sh --hosts '…'`。草稿**不会**写入正式 `policy.json`，也**不会**设置 `WEBCLAW_POLICY_ENABLED=0`。MCP 工具 `webclaw_policy_draft` 在 `WEBCLAW_TOOLS=all` 时可用。
+
 ### 安全边界（必须看）
 
 这是**显式导航动作白名单，不是网络防火墙/完整浏览器沙箱**。本轮不阻断页面子资源、HTTP 重定向、页面 JavaScript、普通点击导致的导航/弹窗、既有浏览器会话、下载、第三方请求。不能声称实现了跨域数据隔离。下一阶段应在 CDP Fetch/Network 层执行所有顶层跳转策略，并加入重定向/弹窗回归；高风险真实站点仍建议专用 profile 与网络 egress 限制。
