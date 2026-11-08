@@ -214,15 +214,29 @@ def test_async_human_reply_does_not_block_cancel(monkeypatch):
     assert worker_ids and all(tid != main_id for tid in worker_ids)
 
 
-def test_cancel_without_managed_job_keeps_native_cli_compatibility(monkeypatch):
-    run = Mock(return_value={'ok': True, 'code': 'OK', 'data': {
-        'stdout': '{"type":"cancel_requested"}', 'exit_code': 0}})
+def test_cancel_idle_returns_no_active_run_without_native_cli(monkeypatch, tmp_path):
+    """Empty cancel must be NO_ACTIVE_RUN (not OK) and must not write global cancel."""
+    monkeypatch.setattr(gw, 'HOME', tmp_path)
+    run = Mock(side_effect=AssertionError('idle cancel must not call native CLI'))
     monkeypatch.setattr(gw, '_run', run)
     result = as_envelope(asyncio.run(gw.webclaw_cancel()))
-    assert result['ok'] and result['code'] == 'OK'
-    assert 'No gateway-managed run' in result['message']
-    assert 'cancel_requested' in result['data']['stdout_tail']
-    run.assert_called_once_with(['cancel'], timeout=30)
+    assert result['ok'] and result['code'] == 'NO_ACTIVE_RUN'
+    assert 'No matching gateway-managed run' in result['message']
+    assert result['data'].get('cancelled') is False
+    assert result['data'].get('native_cancel_skipped') is True
+    run.assert_not_called()
+    assert not (tmp_path / 'control/cancel').exists()
+
+
+def test_cancel_stale_run_id_matches_idle_code(monkeypatch, tmp_path):
+    monkeypatch.setattr(gw, 'HOME', tmp_path)
+    run = Mock(side_effect=AssertionError('stale cancel must not call native CLI'))
+    monkeypatch.setattr(gw, '_run', run)
+    result = as_envelope(asyncio.run(gw.webclaw_cancel(run_id='stale-id-xyz')))
+    assert result['ok'] and result['code'] == 'NO_ACTIVE_RUN'
+    assert result['data'].get('cancelled') is False
+    run.assert_not_called()
+    assert not (tmp_path / 'control/cancel').exists()
 
 
 @pytest.mark.parametrize('event', [

@@ -111,6 +111,8 @@ def test_vision_assert_positive(http_fixture):
     assert done is not None, events[-5:]
     assert done.get("fail", 1) == 0
     assert "画面断言通过" in _logs(events)
+    ar = done.get("assert_report")
+    assert ar and "断言报告-" in str(ar) and Path(ar).is_file(), done
 
 
 def test_vision_assert_miss_fails(http_fixture):
@@ -130,7 +132,9 @@ def test_vision_assert_gate_off(http_fixture):
     done = _done(events)
     assert done is not None
     assert done.get("fail", 0) >= 1
-    assert "画面断言未开启" in (done.get("error") or "") or "画面断言未开启" in _logs(events)
+    blob = (done.get("error") or "") + "\n" + _logs(events)
+    assert "画面断言未开启" in blob
+    assert "加油记录" in blob  # needle in gate message, not hardcoded 登录
 
 
 def test_captcha_ocr_tryfill(http_fixture):
@@ -138,10 +142,26 @@ def test_captcha_ocr_tryfill(http_fixture):
         f"打开{http_fixture}/login.html，等待文字验证码5，"
         f"输入账号=demo，输入密码=demo，点击登录，等待文字加油记录8"
     )
-    events = _run_lite(recipe, timeout=180)
+    # Opt into auto-submit: default OCR is fill-only (no click) to avoid burning retries.
+    events = _run_lite(
+        recipe,
+        timeout=180,
+        env_extra={"WEBCLAW_CAPTCHA_OCR_SUBMIT": "1"},
+    )
     done = _done(events)
     assert done is not None, _logs(events)[-500:]
     assert done.get("fail", 1) == 0
     logs = _logs(events)
     assert "验证码 OCR 试填：K7M2" in logs
+    assert "OCR_OK" in logs or "conf=" in logs
     assert ("验证码已通过" in logs) or ("登录成功" in logs)
+
+
+def test_vision_assert_region_gate_uses_needle(http_fixture):
+    """Region syntax: gate-off error must echo the real needle (not hardcoded 登录)."""
+    recipe = f"打开{http_fixture}/table.html，等待文字加油记录5，断言画面含标题 区域1,2,3,4"
+    events = _run_lite(recipe, env_extra={"WEBCLAW_VISION_ASSERT": "0"}, timeout=90)
+    done = _done(events)
+    assert done is not None
+    blob = (done.get("error") or "") + "\n" + _logs(events)
+    assert "画面断言未开启" in blob and "标题" in blob

@@ -253,3 +253,31 @@ def test_ambiguous_envelope_parses_readable_candidates():
     assert '点击确定#1' in amb['hint']
     assert '点击文字#N' not in amb['hint']
 
+
+
+def test_assert_report_hoisted_into_data_envelope():
+    raw = {
+        "ok": True,
+        "code": "OK",
+        "data": {
+            "stdout": json.dumps({
+                "type": "done", "ok": 1, "fail": 0, "success": True,
+                "assert_report": "/tmp/断言报告-demo.md",
+            }),
+            "stderr": "",
+            "exit_code": 0,
+        },
+    }
+    # _finalize expects done.success for ok path when done present
+    out = as_envelope(gw._finalize(raw))
+    # done may flip ok based on success field
+    assert out["data"].get("assert_report") == "/tmp/断言报告-demo.md"
+
+
+def test_cancel_idle_unified_no_active_run(monkeypatch, tmp_path):
+    import asyncio
+    monkeypatch.setattr(gw, "HOME", tmp_path)
+    monkeypatch.setattr(gw, "_run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no native")))
+    out = as_envelope(asyncio.run(gw.webclaw_cancel()))
+    assert out["code"] == "NO_ACTIVE_RUN" and out["ok"] is True
+    assert out["data"].get("native_cancel_skipped") is True

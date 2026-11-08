@@ -156,6 +156,7 @@ def _parse_done(stdout: str) -> dict | None:
             "error": row.get("error"),
             "error_code": row.get("error_code"),
             "run_dir": row.get("run_dir"),
+            "assert_report": row.get("assert_report") or row.get("assertReport"),
             "raw": row,
         }
     return None
@@ -318,6 +319,12 @@ def _finalize(raw: dict, *, dualwrite: bool = False, structured_data: dict | Non
                 "candidate_count": None,
                 "hint": _AMBIGUOUS_HINT,
             }
+    if done is not None:
+        ar = (done.get("assert_report") or done.get("assertReport")
+              or (done.get("raw") or {}).get("assert_report")
+              or (done.get("raw") or {}).get("assertReport"))
+        if ar:
+            out["data"]["assert_report"] = ar
     if raw.get("job_id"):
         out["run_id"] = raw["job_id"]
         out["run_dir"] = raw.get("run_dir")
@@ -578,11 +585,13 @@ async def webclaw_human_reply(mode: str, text: str = "", run_id: str = "", promp
 
 @mcp.tool()
 async def webclaw_cancel(run_id: str = "") -> dict:
-    """Stop the managed child and request native CLI cancellation.
+    """Stop the managed child (and its cancel marker). Idle cancel is a no-op.
 
     Host Stop must call this tool, not only interrupt the chat/LLM. It can run
     concurrently, including from another stdio session with the same WEBCLAW_HOME.
-    Optional run_id targets one job; a stale id never triggers global CLI cancel.
+    Optional run_id targets one job. Empty / stale / no-active always returns
+    NO_ACTIVE_RUN and never writes the home-global control/cancel marker (avoids
+    collateral cancel of a sibling bare CLI run sharing WEBCLAW_HOME).
     """
     def cancel():
         managed = jobs.cancel_active(run_id or None, home=HOME)
@@ -595,15 +604,15 @@ async def webclaw_cancel(run_id: str = "") -> dict:
                 "code": "OK" if not managed["data"].get("cancel_marker_error") else "RUN_FAILED",
                 "message": "Native cancel marker requested by managed cancellation; no duplicate CLI call",
             }
-        elif managed["code"] != "NO_ACTIVE_RUN" or run_id:
-            result = _finalize(managed)
         else:
-            native = _run(["cancel"], timeout=30)
-            result = _finalize(native)
-            result["data"]["managed_cancel_code"] = managed["code"]
-            result["message"] = ("No gateway-managed run is active; native CLI cancellation requested"
-                                 if native.get("ok") else
-                                 "No gateway-managed run is active; native CLI cancellation failed")
+            # Unify empty-op codes: always NO_ACTIVE_RUN (never OK + side-effect CLI cancel).
+            result = _finalize(managed)
+            if managed.get("code") == ErrorCode.NO_ACTIVE_RUN.value:
+                result["ok"] = True
+                result["code"] = ErrorCode.NO_ACTIVE_RUN.value
+                result["message"] = managed.get("message") or "No matching gateway-managed run is active"
+                result["data"]["cancelled"] = False
+                result["data"]["native_cancel_skipped"] = True
         return scrub_obj(result)
 
     return await anyio.to_thread.run_sync(cancel)
