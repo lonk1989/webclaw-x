@@ -7,3 +7,11 @@ eval/out/
 **/.publish.lock
 **/.eval-all.lock
 *.log
+
+# --- Rust / Cargo (monorepo runtime) ---
+/target/
+**/target/
+**/*.rs.bk
+/runtime/gen/
+/runtime/resources/vc_redist.x64.exe
+/runtime/resources/DirectML.dll

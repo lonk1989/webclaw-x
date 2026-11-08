@@ -32,18 +32,9 @@ from webclaw_x.errors import ErrorCode, envelope  # noqa: E402
 from webclaw_x.scrub import scrub_obj, remember_sensitive
 from webclaw_x import jobs
 from webclaw_x.recipe_library import RecipeLibrary, LibraryError  # noqa: E402
+from webclaw_x.lite_bin import resolve_lite_bin  # noqa: E402
 
-BINARY = os.environ.get(
-    "WEBCLAW_LITE_BIN",
-    str(_ROOT / "bin-webclaw-lite"),
-)
-# Prefer release build if symlink missing
-if not Path(BINARY).is_file():
-    alt = Path("/workspace/webclaw-oss/target/release/webclaw-lite")
-    if alt.is_file():
-        BINARY = str(alt)
-    else:
-        BINARY = str(Path.home() / ".webclaw" / "bin" / "webclaw-lite")
+BINARY = str(resolve_lite_bin(_ROOT))
 
 HOME = Path(os.environ.get("WEBCLAW_HOME", str(Path.home() / ".webclaw")))
 RUN_TIMEOUT = int(os.environ.get("WEBCLAW_RUN_TIMEOUT_MS", "600000")) / 1000

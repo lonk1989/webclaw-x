@@ -35,10 +35,9 @@ def webclaw_home(tmp_path_factory) -> Path:
     for sub in ("bin", "recipes", "runs", "jobs"):
         (home / sub).mkdir()
     os.environ["WEBCLAW_HOME"] = str(home)
-    # Point binary
-    bin_path = Path(os.environ.get("WEBCLAW_LITE_BIN", str(ROOT / "bin-webclaw-lite")))
-    if not bin_path.is_file():
-        bin_path = Path("/workspace/webclaw-oss/target/release/webclaw-lite")
+    # Point binary (monorepo order: env → in-repo target → ~/.webclaw → legacy oss)
+    from webclaw_x.lite_bin import resolve_lite_bin
+    bin_path = resolve_lite_bin(ROOT)
     os.environ["WEBCLAW_LITE_BIN"] = str(bin_path)
     # Prefer headless for CI-ish smoke on the box desktop
     os.environ.setdefault("WEBCLAW_HEADLESS", "1")

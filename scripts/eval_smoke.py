@@ -10,6 +10,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from webclaw_x.lite_bin import resolve_lite_bin
+
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "eval" / "out"
 OUT.mkdir(parents=True, exist_ok=True)
@@ -24,15 +26,7 @@ def main() -> int:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     env.setdefault("WEBCLAW_HEADLESS", "1")
-    bin_path = env.get("WEBCLAW_LITE_BIN") or str(ROOT / "bin-webclaw-lite")
-    for cand in (
-        bin_path,
-        "/workspace/webclaw-oss/target/release/webclaw-lite",
-        str(Path.home() / ".webclaw" / "bin" / "webclaw-lite"),
-    ):
-        if Path(cand).is_file():
-            env["WEBCLAW_LITE_BIN"] = cand
-            break
+    env["WEBCLAW_LITE_BIN"] = str(resolve_lite_bin(ROOT))
 
     py = ROOT / ".venv" / "bin" / "python"
     if not py.is_file():

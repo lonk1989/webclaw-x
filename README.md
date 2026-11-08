@@ -1,26 +1,34 @@
 # webclaw-x
 
-webclaw **二次改造 P0 + P1** 工程落地仓：硬化 MCP 网关 + L1 契约验收 + fixture 评测 + 表格双写 + 定位冲突补丁。
+webclaw **二次改造** 主仓（monorepo）：硬化 MCP 网关 + 内嵌 Rust `runtime/`（`webclaw-lite`）+ L1 契约验收 + fixture 评测。
 
-上游运行时仍是 MIT 的 [webclaw-oss](https://github.com/lonk1989/webclaw-oss)（`webclaw-lite`）。本仓关系见 [FORK.md](./FORK.md)。
+上游引擎源自 MIT 的 [webclaw-oss](https://github.com/lonk1989/webclaw-oss)；本仓以 **x 为主** 收纳 `runtime/`，Host 仍 subprocess 调用 lite（不揉成单进程）。关系与归因见 [FORK.md](./FORK.md)、`runtime/PROVENANCE.md`。本地 `/workspace/webclaw-oss` 保留作镜像/对照，默认不删。
 
 **菜谱语义**：一步 = **指令（verb）** + **目标/参数（args）**；中英动词同一套回放（`打开`/`open`、`等待`/`wait`、`采集`/`collect` …）。示例见 `recipes/fixture-table.webclaw` 与 `recipes/fixture-table.en.webclaw`。
 
 ## 安装
 
 ```bash
-# 1) 已有 release 二进制即可（本机常见路径）
-ls ~/.webclaw/bin/webclaw-lite \
-  || ls /workspace/webclaw-oss/target/release/webclaw-lite
+cd /workspace/webclaw-x
+
+# 1) 从本仓编译 runtime（推荐）
+export PATH="$HOME/.cargo/bin:$PATH"
+./scripts/build_runtime.sh
+# 产物：./target/release/webclaw-lite ，并安装到 ~/.webclaw/bin/webclaw-lite
+# 查找顺序：WEBCLAW_LITE_BIN → 仓内 target/release → bin-webclaw-lite → ~/.webclaw/bin → 旧 oss 路径
+
+# 若已有二进制，也可直接：
+#   ls target/release/webclaw-lite || ls ~/.webclaw/bin/webclaw-lite \
+#     || ls /workspace/webclaw-oss/target/release/webclaw-lite
 
 # 2) Python 依赖（复用已有 venv 或新建）
-cd /workspace/webclaw-x
 # 默认 .venv → /workspace/webclaw-mcp/.venv（含 mcp）
 # 若需独立：
 #   python3 -m venv .venv && .venv/bin/pip install mcp pytest
 
 export PYTHONPATH=/workspace/webclaw-x
-export WEBCLAW_LITE_BIN="${WEBCLAW_LITE_BIN:-$HOME/.webclaw/bin/webclaw-lite}"
+# 一般无需手设；需要钉死路径时：
+# export WEBCLAW_LITE_BIN=$HOME/.webclaw/bin/webclaw-lite
 export WEBCLAW_HEADLESS=1   # 无头冒烟；演示可改 0
 ```
 
@@ -97,8 +105,8 @@ python scripts/eval_components.py     # P1 组件包 → eval/out/components.jso
 python scripts/eval_policy.py         # P1 策略/HITL → eval/out/policy.json
 python scripts/eval_recipe_lib.py     # P1 版本库 → eval/out/recipe-library.json
 python scripts/eval_selfheal.py       # P1 单步自愈 → eval/out/selfheal.json
-# patch 0001（歧义拒绝）+ dualwrite-in-Rust 已编入 ~/.webclaw/bin/webclaw-lite
-# 回滚见 FORK.md
+# runtime 已纳入本仓 runtime/；编译见 ./scripts/build_runtime.sh
+# 回滚与上游归因见 FORK.md
 ```
 
 ## 验收用例（L1）

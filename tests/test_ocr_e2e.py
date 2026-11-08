@@ -19,7 +19,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SITE = ROOT / "fixtures" / "site"
-LITE = Path(os.environ.get("WEBCLAW_LITE_BIN", Path.home() / ".webclaw/bin/webclaw-lite"))
+from webclaw_x.lite_bin import resolve_lite_bin
+LITE = Path(os.environ["WEBCLAW_LITE_BIN"]) if os.environ.get("WEBCLAW_LITE_BIN") else resolve_lite_bin(ROOT)
 OCR_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "webclaw" / "ocr-models"
 MODELS = [
     "PP-OCRv6_det_small.onnx",

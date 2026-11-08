@@ -15,6 +15,8 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from webclaw_x.lite_bin import resolve_lite_bin
+
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
@@ -76,15 +78,7 @@ async def run_l2() -> dict:
     for sub in ("bin", "recipes", "runs", "jobs"):
         (home / sub).mkdir(parents=True, exist_ok=True)
 
-    bin_path = os.environ.get("WEBCLAW_LITE_BIN") or str(ROOT / "bin-webclaw-lite")
-    for cand in (
-        bin_path,
-        str(Path.home() / ".webclaw" / "bin" / "webclaw-lite"),
-        "/workspace/webclaw-oss/target/release/webclaw-lite",
-    ):
-        if Path(cand).is_file():
-            bin_path = cand
-            break
+    bin_path = str(resolve_lite_bin(ROOT))
 
     py = ROOT / ".venv" / "bin" / "python"
     if not py.is_file():

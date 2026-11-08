@@ -3,6 +3,7 @@
 from __future__ import annotations
 import asyncio, json, os, sys
 from pathlib import Path
+from webclaw_x.lite_bin import resolve_lite_bin
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
@@ -14,7 +15,7 @@ ARGS = json.loads(args_list[1]) if len(args_list) > 1 else {}
 
 ROOT = Path("/workspace/webclaw-x")
 os.environ.setdefault("PYTHONPATH", str(ROOT))
-os.environ.setdefault("WEBCLAW_LITE_BIN", os.path.expanduser("~/.webclaw/bin/webclaw-lite"))
+os.environ.setdefault("WEBCLAW_LITE_BIN", str(resolve_lite_bin(ROOT)))
 os.environ.setdefault("WEBCLAW_HOME", os.path.expanduser("~/.webclaw"))
 os.environ.setdefault("WEBCLAW_HEADLESS", os.environ.get("WEBCLAW_HEADLESS", "1"))
 

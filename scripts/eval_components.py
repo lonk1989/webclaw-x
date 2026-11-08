@@ -37,7 +37,8 @@ def main() -> int:
     for sub in ("bin", "recipes", "runs", "jobs"):
         (home / sub).mkdir(parents=True, exist_ok=True)
 
-    bin_path = os.environ.get("WEBCLAW_LITE_BIN") or str(Path.home() / ".webclaw" / "bin" / "webclaw-lite")
+    from webclaw_x.lite_bin import resolve_lite_bin
+    bin_path = str(resolve_lite_bin(ROOT))
     os.environ["WEBCLAW_HOME"] = str(home)
     os.environ["WEBCLAW_LITE_BIN"] = bin_path
     os.environ.setdefault("WEBCLAW_HEADLESS", "1")
