@@ -109,8 +109,8 @@ def test_hitl_live_resume_with_prompt_scoping_and_redaction(isolated, local_url)
             assert rejected['code'] == 'NO_ACTIVE_HUMAN'
         fake_code = 'TEST-OTP-NOT-A-REAL-CODE-572914'
         resumed = asyncio.run(gw.webclaw_human_reply(mode='text', text=fake_code, run_id=rid, prompt_id=prompt_id))
-        assert fake_code not in resumed
-        result = json.loads(resumed)
+        assert fake_code not in json.dumps(resumed, ensure_ascii=False)
+        result = as_envelope(resumed)
         assert result['ok'] and result['code'] == 'OK', result
         assert result['done']['success']
         assert list((Path(result['done']['run_dir']) / 'documents').glob('*.md'))
@@ -129,8 +129,9 @@ def test_hitl_unlabeled_and_jsonl_secrets_are_redacted():
         'stdout': json.dumps({'type': 'log', 'message': value, 'password': 'TEST-PASS'})+'\n',
         'stderr': value, 'exit_code': 0}}):
         result = gw.webclaw_last_log()
-    assert value not in result and 'TEST-PASS' not in result
-    assert 'REDACTED' in result
+    blob = json.dumps(as_envelope(result), ensure_ascii=False)
+    assert value not in blob and 'TEST-PASS' not in blob
+    assert 'REDACTED' in blob
 
 
 def test_timeout_overrides_previous_human_event():

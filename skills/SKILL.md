@@ -1,6 +1,15 @@
 # webclaw-x Skill
 
+> 与 MCP `instructions` 共用同一张快卡（`webclaw_x/fast_card.py`）。**不要**再叠读 `skills/webclaw-lite/SKILL.md` 全文，除非走伙伴远程路径。
+
 确定性菜谱浏览器 RPA（菜谱 = 指令 + 目标/参数；中英动词同源）。通过 MCP 工具调用，不要用 Playwright/CSS 重写。
+
+## 首载（Host 必读）
+
+1. **常驻 MCP stdio**：一个会话只拉起一次 `python -m webclaw_x.server`，禁止每个工具 respawn（评测桥请用 `scripts/call_tool.py --persist`）。
+2. **status 热路径**：默认不 spawn lite；`chromeOk`=二进制存在，`cdpReady`=调试口可连，实例看 `chromeInstances`。深度 HITL 字段才设 `WEBCLAW_STATUS_MODE=lite`。
+3. **可选预热**：`WEBCLAW_PREWARM=1` 在网关启动时后台拉起/复用 Chrome（默认关，不改语义）。
+4. 首轮 `status`∥`list_recipes` 各一次即可；勿 status×3。
 
 ## 铁律
 
@@ -16,7 +25,7 @@
 
 | 工具 | 用途 |
 |------|------|
-| webclaw_status | 健康检查（`chromeOk`=Chrome 二进制存在；`cdpReady`=调试口可连；实例唯一性看 `chromeInstances.orphanRisk`/`chromeWarn`） |
+| webclaw_status | 健康检查（热路径；`chromeOk`/`cdpReady`/`chromeInstances`） |
 | webclaw_run | 执行完整菜谱 |
 | webclaw_probe | 编排期扫页 |
 | webclaw_freeze | 保存菜谱 |

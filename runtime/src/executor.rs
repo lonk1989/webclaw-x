@@ -2076,6 +2076,9 @@ pub async fn execute_recipe_for_task_from_with_params<R: Runtime>(
                 20
             } else if step.keyword == "登录" {
                 20
+            } else if step.keyword == "打开" || step.keyword == "打开标签" {
+                // 「打开」路径内已 wait_after_navigation；步后再用长超时会空转 ~1–2s
+                2
             } else if step.is_or_try() {
                 // 试探命中后页面通常已就绪，短等即可
                 3
@@ -2106,7 +2109,8 @@ pub async fn execute_recipe_for_task_from_with_params<R: Runtime>(
                 let _ = crate::client_download::ensure_automation_capture(&client).await;
             }
 
-            if matches!(step.keyword.as_str(), "点击" | "打开" | "登录") {
+            // 「打开/打开标签」已在回收标签内导航，无需再空等 window.open 子标签（可省 ~1.2s）
+            if matches!(step.keyword.as_str(), "点击" | "登录") {
                 let may_open_tab = client.click_may_open_tab;
                 match client
                     .try_follow_opener_child_tab_cancel(

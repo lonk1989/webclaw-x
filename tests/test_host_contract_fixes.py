@@ -215,6 +215,7 @@ def test_watchdog_real_child_timeout_without_log_inference(tmp_path, monkeypatch
 
 @pytest.mark.parametrize('pretty,prefix', [(False, ''), (True, ''), (False, 'diagnostic\n')])
 def test_status_primary_fields_are_structured(monkeypatch, pretty, prefix):
+    monkeypatch.setenv('WEBCLAW_STATUS_MODE', 'lite')  # exercise CLI path; fast covered elsewhere
     status = {'bin': 'synthetic', 'chrome': '/synthetic/chrome', 'chromeOk': True,
               'version': 'test', 'product': 'webclaw-lite', 'password': 'FAKE-PASSWORD'}
     monkeypatch.setattr(gw, '_run', Mock(return_value={'ok': True, 'code': 'OK', 'data': {
@@ -229,6 +230,7 @@ def test_status_primary_fields_are_structured(monkeypatch, pretty, prefix):
 
 @pytest.mark.parametrize('stdout', ['not json', '[]', 'null'])
 def test_invalid_status_is_explicit_failure(monkeypatch, stdout):
+    monkeypatch.setenv('WEBCLAW_STATUS_MODE', 'lite')
     monkeypatch.setattr(gw, '_run', Mock(return_value={'ok': True, 'code': 'OK',
                                                        'data': {'stdout': stdout, 'exit_code': 0}}))
     out = as_envelope(gw.webclaw_status())
@@ -236,6 +238,7 @@ def test_invalid_status_is_explicit_failure(monkeypatch, stdout):
 
 
 def test_status_missing_binary_retains_error_envelope(monkeypatch):
+    monkeypatch.setenv('WEBCLAW_STATUS_MODE', 'lite')
     monkeypatch.setattr(gw, '_run', Mock(return_value={'ok': False, 'code': 'BINARY_MISSING', 'data': {}}))
     out = as_envelope(gw.webclaw_status())
     assert not out['ok'] and out['code'] == 'BINARY_MISSING'

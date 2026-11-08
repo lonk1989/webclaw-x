@@ -14,6 +14,18 @@
 **WorkBuddy 可以接自定义 stdio MCP**，因此「装 WorkBuddy 跑本仓 MCP」方向成立。  
 本机（Grok Bot box）是否方便安装 WorkBuddy 客户端取决于其发行渠道（多为桌面安装包 / 腾讯系分发）；**P0 发版门禁仍以 L1（本仓 pytest）+ L2（MCP Inspector / 最小 Client）为准**，WorkBuddy 为 L3。
 
+## 首载加速：常驻 MCP（强制约定）
+
+第三方 Host / 自研桥 **必须常驻 stdio 会话**：
+
+- ✅ 一次 `command`+`args` 拉起 `python -m webclaw_x.server`，会话内多次 `tools/call`
+- ❌ 每个工具调用都重新 spawn Python 网关（旧 `call_tool.py` 单次模式会把就绪从 ~0.4s 打到 ~2s+）
+- 评测脚本请用：`python scripts/call_tool.py --persist webclaw_status '{}' webclaw_list_recipes '{}'`
+- `webclaw_status` 默认 **Host 热路径**（不进 lite）；深度 HITL 才设 `WEBCLAW_STATUS_MODE=lite`
+- 可选 `WEBCLAW_PREWARM=1`：网关启动时后台预热 Chrome（默认关）
+
+`chromeOk` = Chrome 二进制存在；`cdpReady` = 调试口可连；多实例/孤儿看 `chromeInstances.orphanRisk` / `chromeWarn`。
+
 ## WorkBuddy 证据
 
 1. 腾讯云开发者社区《如何在 WorkBuddy 中使用 MCP Server？》（2026-06-25）  

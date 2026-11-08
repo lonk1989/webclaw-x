@@ -1986,9 +1986,12 @@ impl CdpClient {
                 .unwrap_or_default();
             if ready == "complete" || ready == "interactive" {
                 stable_ticks += 1;
+                // 已就绪：短确认即可（50ms），避免固定 300ms×2 空转
                 if stable_ticks >= 2 {
                     return Ok(());
                 }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                continue;
             } else {
                 stable_ticks = 0;
             }

@@ -32,6 +32,13 @@ export PYTHONPATH=/workspace/webclaw-x
 export WEBCLAW_HEADLESS=1   # 无头冒烟；演示可改 0
 ```
 
+### 首载约定（Agent / 第三方 Host）
+
+- **常驻 stdio**：禁止每工具 respawn；评测用 `scripts/call_tool.py --persist …`
+- **status 热路径**：默认不 spawn lite（`WEBCLAW_STATUS_MODE=fast`）；`WEBCLAW_STATUS_MODE=lite` 才走 CLI
+- **可选预热**：`WEBCLAW_PREWARM=1` 在网关启动时后台确保 CDP 就绪
+- Skill 与 MCP instructions 共用 `webclaw_x/fast_card.py` 一张快卡，勿叠读 lite/伙伴 Skill 全文
+
 ### 启动 MCP（stdio）
 
 ```bash

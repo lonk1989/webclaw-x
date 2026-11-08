@@ -80,6 +80,8 @@ pub fn print_usage() {
 用法:
   webclaw-lite install
   webclaw-lite status [--run-id <id>]
+  webclaw-lite prewarm
+  webclaw-lite serve [--socket <path>]   # 最小 daemon：ping/status/prewarm（run 仍走 CLI）
   webclaw-lite probe [--url URL] [--types 输入框,按钮,图标按钮,链接] [--search 关键词] [--limit 60]
   webclaw-lite recipe save --name <stem> (--stdin | --file <path>) [--title 标题]
   webclaw-lite recipe list
@@ -111,6 +113,7 @@ pub fn print_usage() {
   WEBCLAW_CDP_PORT      CDP 端口（默认 19222）
   WEBCLAW_HEADLESS      设为 1 时无头启动 Chrome（默认弹出可见窗口）
   WEBCLAW_CHROME_RECYCLE 设为 1 时强制杀再启浏览器（默认复用健康 CDP）
+  WEBCLAW_LITE_SOCKET   serve 默认 socket（否则 <WEBCLAW_HOME>/lite.sock）
   WEBCLAW_VISION_ASSERT 设为 1 时启用「断言画面含 …」OCR 断言
   WEBCLAW_VISION_OCR_TIMEOUT_MS 画面断言 OCR 超时毫秒（默认 5000）
   WEBCLAW_CAPTCHA_OCR   设为 0 时关闭验证码 RapidOCR 试填（默认开，失败回落 HITL）
@@ -356,6 +359,162 @@ fn human_reply_cli(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+
+fn lite_prewarm() -> Result<(), String> {
+    ensure_lite_env();
+    let headless = std::env::var("WEBCLAW_HEADLESS")
+        .ok()
+        .map(|v| {
+            let t = v.trim();
+            t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    let (port, reused, msg) = rt.block_on(crate::chrome::ensure_worker_chrome(
+        headless,
+        true,
+        "prewarm",
+    ))?;
+    println!(
+        "{}",
+        json!({
+            "type": "prewarm",
+            "ok": true,
+            "port": port,
+            "reused": reused,
+            "message": msg,
+        })
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+fn lite_serve(socket_path: &std::path::Path) -> Result<(), String> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    ensure_lite_env();
+    if socket_path.exists() {
+        let _ = std::fs::remove_file(socket_path);
+    }
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let listener = UnixListener::bind(socket_path).map_err(|e| e.to_string())?;
+    eprintln!("webclaw-lite serve listening on {}", socket_path.display());
+    println!(
+        "{}",
+        json!({"type":"serve_started","socket": socket_path.display().to_string()})
+    );
+    for conn in listener.incoming() {
+        let mut stream = match conn {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("serve accept: {e}");
+                continue;
+            }
+        };
+        let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
+        let mut line = String::new();
+        if reader.read_line(&mut line).is_err() {
+            continue;
+        }
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let req: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    json!({"ok":false,"error": format!("bad json: {e}")})
+                );
+                continue;
+            }
+        };
+        let op = req.get("op").and_then(|v| v.as_str()).unwrap_or("");
+        let resp = match op {
+            "ping" => json!({"ok": true, "op": "ping", "product": "webclaw-lite", "version": product_version()}),
+            "status" => {
+                // Reuse blocking status builder into a Value (capture stdout is awkward);
+                // call the same probe path inline.
+                let home = std::env::var("WEBCLAW_HOME").unwrap_or_default();
+                let chrome = std::env::var("WEBCLAW_CHROME").unwrap_or_default();
+                let chrome_bin_ok = !chrome.is_empty() && Path::new(&chrome).is_file();
+                let bin = std::env::current_exe()
+                    .ok()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                let port = crate::chrome::worker_cdp_port();
+                let cdp_ready = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .ok()
+                    .map(|rt| rt.block_on(crate::chrome::is_debug_port_ready_on(port)))
+                    .unwrap_or(false);
+                let chrome_inspect = crate::chrome::inspect_chrome_on_port(port, cdp_ready);
+                json!({
+                    "ok": true,
+                    "op": "status",
+                    "status": {
+                        "type": "status",
+                        "product": "webclaw-lite",
+                        "version": product_version(),
+                        "home": home,
+                        "bin": bin,
+                        "chrome": if chrome.is_empty() { serde_json::Value::Null } else { json!(chrome) },
+                        "chromeOk": chrome_bin_ok,
+                        "cdpPort": port,
+                        "cdpReady": cdp_ready,
+                        "chromeInstances": chrome_inspect,
+                        "statusSource": "lite_serve",
+                    }
+                })
+            }
+            "prewarm" => match lite_prewarm_value() {
+                Ok(v) => json!({"ok": true, "op": "prewarm", "result": v}),
+                Err(e) => json!({"ok": false, "op": "prewarm", "error": e}),
+            },
+            "quit" | "exit" => {
+                let _ = writeln!(stream, "{}", json!({"ok": true, "op": "quit"}));
+                break;
+            }
+            other => json!({
+                "ok": false,
+                "error": format!("unsupported op '{other}' (phase-1 serve: ping|status|prewarm|quit; run still CLI)"),
+            }),
+        };
+        let _ = writeln!(stream, "{resp}");
+    }
+    let _ = std::fs::remove_file(socket_path);
+    Ok(())
+}
+
+fn lite_prewarm_value() -> Result<serde_json::Value, String> {
+    ensure_lite_env();
+    let headless = std::env::var("WEBCLAW_HEADLESS")
+        .ok()
+        .map(|v| {
+            let t = v.trim();
+            t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    let (port, reused, msg) = rt.block_on(crate::chrome::ensure_worker_chrome(
+        headless,
+        true,
+        "prewarm",
+    ))?;
+    Ok(json!({"port": port, "reused": reused, "message": msg}))
+}
+
 fn lite_status(run_id: Option<&str>) -> Result<(), String> {
     ensure_lite_env();
     let home = std::env::var("WEBCLAW_HOME").unwrap_or_default();
@@ -502,6 +661,59 @@ pub fn run_cli() {
                 std::process::exit(2);
             }
         },
+        "prewarm" => match lite_prewarm() {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(2);
+            }
+        },
+        "serve" => {
+            #[cfg(unix)]
+            {
+                let mut sock = std::env::var("WEBCLAW_LITE_SOCKET")
+                    .ok()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| {
+                        let home = std::env::var("WEBCLAW_HOME").unwrap_or_else(|_| {
+                            std::env::var("HOME").map(|h| format!("{h}/.webclaw")).unwrap_or_else(|_| ".webclaw".into())
+                        });
+                        std::path::PathBuf::from(home).join("lite.sock")
+                    });
+                let mut i = 2;
+                while i < args.len() {
+                    match args[i].as_str() {
+                        "--socket" => {
+                            i += 1;
+                            if let Some(p) = args.get(i) {
+                                sock = std::path::PathBuf::from(p);
+                            }
+                        }
+                        "-h" | "--help" => {
+                            print_usage();
+                            std::process::exit(0);
+                        }
+                        other => {
+                            eprintln!("未知参数: {other}");
+                            std::process::exit(2);
+                        }
+                    }
+                    i += 1;
+                }
+                match lite_serve(&sock) {
+                    Ok(()) => std::process::exit(0),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                eprintln!("serve 仅支持 Unix socket（Windows 待补）");
+                std::process::exit(2);
+            }
+        }
         "status" => {
             let mut run_id = None;
             let mut i = 2;
