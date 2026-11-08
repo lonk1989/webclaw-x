@@ -6,28 +6,43 @@
   <style>
     body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 420px; }
     label { display: block; margin-top: 0.75rem; }
-    input { width: 100%; padding: 0.4rem; }
+    input { width: 100%; padding: 0.4rem; box-sizing: border-box; }
+    .captcha-row { display: flex; align-items: center; gap: 0.75rem; margin-top: 0.75rem; }
+    .captcha-row input { flex: 1; }
+    #vCodeImg { width: 200px; height: 72px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
     button { margin-top: 1rem; padding: 0.5rem 1rem; }
     .err { color: #b00020; display: none; }
+    .hint { color: #666; font-size: 0.85rem; }
   </style>
 </head>
 <body>
   <h1>Fixture 登录</h1>
+  <p class="hint">图形验证码为合成图 K7M2（供 OCR 端到端；非真实业务）。</p>
   <form id="loginForm" action="table.html" method="get">
-    <label>账号 <input id="user" name="user" type="text" placeholder="demo" /></label>
-    <label>密码 <input id="pwd" name="pwd" type="password" placeholder="••••" /></label>
-    <label>验证码 <input id="captcha" name="captcha" type="text" placeholder="可选" /></label>
-    <button type="submit" id="loginBtn">登 录</button>
+    <label>账号 <input id="user" name="user" type="text" placeholder="账号" autocomplete="username" /></label>
+    <label>密码 <input id="pwd" name="pwd" type="password" placeholder="密码" autocomplete="current-password" /></label>
+    <div class="captcha-row">
+      <label style="flex:1;margin:0">验证码
+        <input id="captcha" name="captcha" type="text" placeholder="验证码" autocomplete="off" />
+      </label>
+      <img id="vCodeImg" src="captcha-K7M2.png" width="200" height="72" alt="验证码" title="验证码" />
+    </div>
+    <button type="submit" id="loginBtn">登录</button>
   </form>
-  <p class="err" id="err">账号或密码错误（fixture 任意非空即可）</p>
+  <p class="err" id="err">账号、密码或验证码不正确</p>
   <script>
+    // 期望码与合成图一致；空/错码阻止提交，便于点击登录后仍停留在本页给 OCR 裁图试填
+    var EXPECTED = 'K7M2';
     document.getElementById('loginForm').addEventListener('submit', function (e) {
       var u = document.getElementById('user').value.trim();
       var p = document.getElementById('pwd').value;
-      if (!u || !p) {
+      var c = (document.getElementById('captcha').value || '').replace(/\s+/g, '').toUpperCase();
+      if (!u || !p || c !== EXPECTED) {
         e.preventDefault();
         document.getElementById('err').style.display = 'block';
+        return false;
       }
+      document.getElementById('err').style.display = 'none';
     });
   </script>
 </body>

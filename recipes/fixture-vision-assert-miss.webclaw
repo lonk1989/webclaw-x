@@ -1,0 +1,2 @@
+# Vision assert negative: needle must be absent
+打开http://127.0.0.1:8765/table.html，等待文字加油记录5，断言画面含绝不可能出现的词XYZ999

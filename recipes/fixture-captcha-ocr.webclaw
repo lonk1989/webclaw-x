@@ -1,0 +1,2 @@
+# Captcha OCR e2e: synthetic image K7M2 on login fixture
+打开http://127.0.0.1:8765/login.html，等待文字验证码5，输入账号=demo，输入密码=demo，点击登录，等待文字加油记录8
