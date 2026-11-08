@@ -40,3 +40,12 @@
 ## 落地状态（2026-11-08 Asia/Shanghai）
 
 已在 webclaw-oss 运行时落地：`parse_click_text_args` 默认 index=0；`locate_global_click_text_once` 多候选返回 `AMBIGUOUS_TARGET`；L1 `test_v03_ambiguous_target` 绿。
+
+## 候选可读性（2026-11-08 Asia/Shanghai）
+
+豆包 L3：`AMBIGUOUS_TARGET` 可用，但候选只有相同 CDP `target=`，人/Host 无法辨认 A/B/C。
+
+已改：
+- lite `compose_click_text_catalog` 附带 `tag/text/context/x/y/clickable`
+- 错误文案形如 `#1 button「确定」旁「对话框 A」主文档@(120,80) 硬可点`
+- MCP `ambiguous.candidate_count` + `candidates[].label`；hint 改为「同文案后加 #N（例如 点击确定#1）」

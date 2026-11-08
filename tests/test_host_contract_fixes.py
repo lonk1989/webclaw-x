@@ -235,3 +235,21 @@ def test_status_missing_binary_retains_error_envelope(monkeypatch):
     monkeypatch.setattr(gw, '_run', Mock(return_value={'ok': False, 'code': 'BINARY_MISSING', 'data': {}}))
     out = as_envelope(gw.webclaw_status())
     assert not out['ok'] and out['code'] == 'BINARY_MISSING'
+
+def test_ambiguous_envelope_parses_readable_candidates():
+    err = (
+        'AMBIGUOUS_TARGET:「确定」匹配到 3 个候选，请加 #序号（例如 点击确定#1）。'
+        '候选：#1 button「确定」旁「对话框 A」主文档@(120,80) 硬可点；'
+        '#2 button「确定」旁「对话框 B」主文档@(120,180) 硬可点；'
+        '#3 button「确定」旁「对话框 C」主文档@(120,280) 硬可点'
+    )
+    out = finalize([{'type': 'done', 'ok': 2, 'fail': 1, 'error_code': 'AMBIGUOUS_TARGET', 'error': err}])
+    assert out['code'] == 'AMBIGUOUS_TARGET'
+    amb = out['ambiguous']
+    assert amb['candidate_count'] == 3
+    assert len(amb['candidates']) == 3
+    assert amb['candidates'][0]['n'] == 1
+    assert '对话框 A' in amb['candidates'][0]['label']
+    assert '点击确定#1' in amb['hint']
+    assert '点击文字#N' not in amb['hint']
+

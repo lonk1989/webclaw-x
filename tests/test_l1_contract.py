@@ -123,6 +123,7 @@ def test_v03_ambiguous_target(http_fixture):
     """Expect AMBIGUOUS_TARGET when clicking bare「确定」on multi-match page.
 
     Patch 0001: bare 点击确定 with ≥2 matches must refuse silent first-click.
+    Readable candidates: distinct nearby labels (对话框 A/B/C), not identical CDP target ids.
     """
     if not Path(gw.BINARY).is_file():
         pytest.skip("binary missing")
@@ -132,12 +133,26 @@ def test_v03_ambiguous_target(http_fixture):
     code = out.get("code")
     amb = out.get("ambiguous")
     blob = json.dumps(out, ensure_ascii=False)
+    msg = str(out.get("message") or "") + "\n" + str((out.get("done") or {}).get("error") or "")
     assert out.get("ok") is False, f"expected failure on ambiguous click, got ok: {blob[:800]}"
     assert (
         code == ErrorCode.AMBIGUOUS_TARGET.value
         or (amb and amb.get("ambiguous"))
         or "AMBIGUOUS_TARGET" in blob
     ), f"expected AMBIGUOUS_TARGET, got: {blob[:1200]}"
+    # 可读性：至少两个不同「对话框」旁标，且不再只剩相同 target=HEX
+    assert "对话框" in msg, f"expected nearby context in message: {msg[:800]}"
+    assert "对话框 A" in msg and "对话框 B" in msg, f"expected distinct A/B labels: {msg[:800]}"
+    assert "target=" not in msg or "旁「" in msg, f"legacy target= only is not readable: {msg[:800]}"
+    assert amb and amb.get("ambiguous") is True
+    assert amb.get("candidate_count") == 3, amb
+    cands = amb.get("candidates") or []
+    assert len(cands) >= 2, amb
+    labels = " ".join(c.get("label", "") for c in cands)
+    assert "对话框" in labels, amb
+    hint = amb.get("hint") or ""
+    assert "点击确定#1" in hint or "同文案后加 #N" in hint, hint
+    assert "点击文字#N" not in hint, hint
 
 
 # ---------- V-04 HITL ----------

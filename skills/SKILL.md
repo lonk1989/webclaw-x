@@ -7,7 +7,7 @@
 1. **完整/冻结菜谱 → 只 `webclaw_run` 一次。禁止逐步 probe。**
 2. `webclaw_probe` 仅编排期写菜谱；写完 `webclaw_freeze`，复跑只用 run。
 3. 密码/验证码永不进菜谱或聊天；HITL 用 `webclaw_human_reply`。
-4. 若返回 `AMBIGUOUS_TARGET`：展示候选，让用户选 `#N`，禁止猜点。
+4. 若返回 `AMBIGUOUS_TARGET`：展示可读候选（旁文案/坐标），让用户选 `#N`（同文案后加，如 `点击确定#1`），禁止猜点。
 5. 优先 `recipe_path` 指向已冻结 `.webclaw`。
 6. 菜谱含 `{{参数}}`，须先让用户确认非秘密参数，再传 `params_confirmed=true`；网关未确认会返回 `PARAMS_UNCONFIRMED` 和参数名，不启动 lite。环境绑定/默认值也不能替代用户确认。
 7. 发现菜谱读 `webclaw_list_recipes` 的 `data.recipes`，平铺和版本库统一列出；用 `id` 固定 `recipe_ref`，不要猜文件路径。
@@ -41,7 +41,7 @@ open http://127.0.0.1:PORT/table.html, wait 加油记录5, collect table
 
 MVP 动词：打开/open、点击/click、等待/wait、输入/type、采集/collect、刷新/reload、截图/screenshot、滚动/scroll、按/press、参数/param。英文粘连合法（如 `openhttps://…`、`wait2`），也可用空格分隔。
 
-优先 `等待文字…` / `等待消失…` / `等待下载`，少写固定 `等待N`。画面断言（可选）：`断言画面含 登录`（需 `WEBCLAW_VISION_ASSERT=1`）。多候选点击会返回 `AMBIGUOUS_TARGET`，请加 `#N`。
+优先 `等待文字…` / `等待消失…` / `等待下载`，少写固定 `等待N`。画面断言（可选）：`断言画面含 登录`（需 `WEBCLAW_VISION_ASSERT=1`）。多候选点击会返回 `AMBIGUOUS_TARGET` 与可读候选（旁文案/坐标）；请在同文案后加 `#N`（如 `点击确定#1`）。
 
 不要：`打开…` → probe → 点按钮 → probe → …（复跑期禁止）。
 

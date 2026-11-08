@@ -166,24 +166,61 @@ _AMBIGUOUS_RE = re.compile(
 )
 
 
+_AMBIGUOUS_HINT = (
+    "多候选时请在同文案后加 #N（例如 点击确定#1），"
+    "或先 probe 查看 candidates，禁止静默点第一个。"
+)
+
+
+def _parse_ambiguous_candidates(text: str) -> list[dict]:
+    """从 lite 错误文案解析可读候选行：#N label…（分号分隔）。
+
+    只吃「候选：」后第一段；遇已见过的 #N 即停，避免 done JSON 二次拼接重复。
+    """
+    m = re.search(r"候选[：:]\s*", text)
+    if not m:
+        return []
+    rest = text[m.end():]
+    out: list[dict] = []
+    seen: set[int] = set()
+    for mm in re.finditer(r"#(\d+)\s*([^#；;\n]+)", rest):
+        n = int(mm.group(1))
+        if n in seen:
+            break
+        label = (mm.group(2) or "").strip().rstrip("。\"'}]")
+        if not label:
+            continue
+        seen.add(n)
+        out.append({"n": n, "label": label})
+    return out
+
+
 def _detect_ambiguous(stdout: str, stderr: str, done: dict | None) -> dict | None:
+    done = done or {}
+    # Prefer structured done.error（单份文案），再拼日志；避免 JSON dump 重复污染候选解析
+    primary = str(done.get("error") or done.get("message") or "")
     blob = "\n".join(
         [
+            primary,
             stdout or "",
             stderr or "",
-            json.dumps(done or {}, ensure_ascii=False),
+            json.dumps(done, ensure_ascii=False),
         ]
     )
     if not _AMBIGUOUS_RE.search(blob):
         return None
-    # Best-effort extract candidate count
-    m = re.search(r"共\s*(\d+)\s*个", blob)
-    count = int(m.group(1)) if m else None
-    return {
+    # Prefer「匹配到 N 个候选」；兼容旧「共 N 个足够匹配」
+    m = re.search(r"匹配到\s*(\d+)\s*个", blob) or re.search(r"共\s*(\d+)\s*个", blob)
+    candidates = _parse_ambiguous_candidates(primary) or _parse_ambiguous_candidates(blob)
+    count = int(m.group(1)) if m else (len(candidates) or None)
+    out = {
         "ambiguous": True,
         "candidate_count": count,
-        "hint": "多候选时请改用 点击文字#N 或先 probe 查看 candidates，禁止静默点第一个。",
+        "hint": _AMBIGUOUS_HINT,
     }
+    if candidates:
+        out["candidates"] = candidates
+    return out
 
 
 # Only protocol events, not page/log payloads, may supply authoritative codes.
@@ -276,9 +313,10 @@ def _finalize(raw: dict, *, dualwrite: bool = False, structured_data: dict | Non
         if code:
             out["code"] = code
         if out["code"] == ErrorCode.AMBIGUOUS_TARGET.value:
-            out["ambiguous"] = {
-                "ambiguous": True, "candidate_count": None,
-                "hint": "多候选时请改用 点击文字#N 或先 probe 查看 candidates，禁止静默点第一个。",
+            out["ambiguous"] = _detect_ambiguous(stdout, stderr, done) or {
+                "ambiguous": True,
+                "candidate_count": None,
+                "hint": _AMBIGUOUS_HINT,
             }
     if raw.get("job_id"):
         out["run_id"] = raw["job_id"]
