@@ -300,10 +300,20 @@ if [ "$NO_MERGE" != "1" ]; then
   merge_mcp "$HOME/.cursor/mcp.json" "$PY" "$LITE_DEST" "$HOME_DIR"
 fi
 
+POLICY_PATH="$HOME_DIR/policy.json"
 if [ -n "$HOSTS" ]; then
-  DRAFT="$HOME_DIR/policy.json.draft"
-  "$PY" -c "from webclaw_x.policy_draft import draft_policy; import json, pathlib; p=pathlib.Path(r'''$DRAFT'''); p.write_text(json.dumps(draft_policy('''$HOSTS'''), ensure_ascii=False, indent=2)+'\n', encoding='utf-8'); print(p)"
-  step "policy draft → $DRAFT"
+  "$PY" -c "from webclaw_x.policy_draft import draft_policy; import json, pathlib; p=pathlib.Path(r'''$POLICY_PATH'''); p.write_text(json.dumps(draft_policy('''$HOSTS''', enabled=True), ensure_ascii=False, indent=2)+'\n', encoding='utf-8'); print(p)"
+  step "policy ON with hosts → $POLICY_PATH"
+else
+  cat > "$POLICY_PATH" <<'EOF'
+{
+  "enabled": false,
+  "allow_localhost": true,
+  "allowed_hosts": [],
+  "_comment": "Default off for public install. Set enabled:true + allowed_hosts to opt in."
+}
+EOF
+  step "policy OFF → $POLICY_PATH"
 fi
 
 echo
@@ -313,3 +323,4 @@ echo "  host:  $PY -m webclaw_x.server"
 echo "  home:  $HOME_DIR"
 echo "下一步：重启 WorkBuddy，确认 webclaw-x 绿灯；对话「用 webclaw 查一下 status」"
 echo "说明：https://github.com/lonk1989/webclaw-x/blob/main/docs/workbuddy-quickstart.md"
+echo "导航白名单默认关闭；需要时编辑 $POLICY_PATH"

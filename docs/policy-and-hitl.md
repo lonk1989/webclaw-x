@@ -12,14 +12,14 @@
 }
 ```
 
-- 未配文件：**默认启用**，仅放行 `localhost` / `127.0.0.1` / `[::1]` 与内部 `about:blank`。
-- 精确 host 匹配，大小写/尾点规范化；不支持通配符。`example.com` **不**放行子域、`example.com.evil.test`。
-- 含 URL 用户名/密码，以及 `file:` / `data:` / `javascript:` 默认拒绝。
-- 错误/不可读的显式文件、未知配置字段：fail-closed，`POLICY_DENIED`。
+- **产品默认关闭**：无 `policy.json` 时 `enabled=false`（公开安装 / 蜂行均可直接打开业务站）。需要加固时再显式开启。
+- 一键安装会写入 `policy.json` 且 `enabled: false`；传 `WEBCLAW_HOSTS` / `--hosts` 时改为开启并填入名单。
+- 开启后：精确 host 匹配，大小写/尾点规范化；不支持通配符。`example.com` **不**放行子域。
+- 开启后仍拒绝 URL 用户名/密码，以及 `file:` / `data:` / `javascript:`（`about:blank` 与 localhost 按 `allow_localhost`）。
+- 显式文件存在但损坏 / 未知字段：fail-closed，`POLICY_DENIED`。
 - 每次导航重读配置；无需重启。
-- `打开`、英文别名 `open`、`打开标签`、`probe --url` 走导航校验；直接 CLI 同样生效，不能绕过 MCP。
-- 环境开关：`WEBCLAW_POLICY_ENABLED=0`（或配置 `"enabled": false`）；**由部署者设置，不根据页面内容自动关闭**。
-- `allow_localhost: false` 可关闭 fixture 豁免；通过 `allowed_hosts` 精确开放所需 host。
+- `打开` / `open` / `打开标签` / `probe --url` 走导航校验；直接 CLI 同样生效。
+- 环境开关：`WEBCLAW_POLICY_ENABLED=0` 强制关闭；**不要**根据页面内容自动开关。
 
 示例文件：`config/policy.example.json`。复制到自己的 `$WEBCLAW_HOME/policy.json` 前应审阅 host 列表。
 

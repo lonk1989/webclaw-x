@@ -49,9 +49,8 @@ curl -fsSL https://raw.githubusercontent.com/lonk1989/webclaw-x/main/scripts/ins
 
 ## 3. 真业务 checklist（开跑前勾完）
 
-- [ ] **policy**：业务 host 已写入 `$WEBCLAW_HOME/policy.json` 的 `allowed_hosts`  
-      草稿：`python scripts/policy_draft.py --hosts 'app.example.com' --out $WEBCLAW_HOME/policy.json.draft`  
-      → 部署者审阅后改名为 `policy.json`。**禁止**自动设 `WEBCLAW_POLICY_ENABLED=0`。
+- [ ] **policy（可选）**：默认关闭。若要加固，把业务 host 写入 `$WEBCLAW_HOME/policy.json` 并设 `enabled: true`  
+      `python scripts/policy_draft.py --hosts 'app.example.com' --out $WEBCLAW_HOME/policy.json`
 - [ ] **params_confirmed**：非秘密 `{{…}}` 已由用户确认。
 - [ ] **HITL / 登录**：验证码与确认等人；不猜码。需要登录态时复用 Chrome profile（见下）。
 - [ ] **cancel**：Host Stop = 真调 `webclaw_cancel`，防 `RUN_BUSY` 残留。

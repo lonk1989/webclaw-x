@@ -66,16 +66,19 @@ curl -fsSL https://raw.githubusercontent.com/lonk1989/webclaw-x/main/scripts/ins
 
 Cursor：设置 → MCP，确认 `webclaw-x` 已加载后重连。
 
-## 域名白名单（跑真实业务前必做）
+## 域名白名单（可选加固）
 
-未配置时，导航到未放行域名会被拒绝（`POLICY_DENIED`）。
+**默认关闭**，安装后即可打开任意业务站。若要启用：
 
-```text
-%LOCALAPPDATA%\webclaw\policy.json.draft   → 审阅后改名为 policy.json
-~/.webclaw/policy.json.draft               → 同上
+```json
+{
+  "enabled": true,
+  "allow_localhost": true,
+  "allowed_hosts": ["app.example.com", "login.example.com"]
+}
 ```
 
-只写精确主机名，不要 `*`。改完后无需重装，重连 MCP 即可。
+写入 `%LOCALAPPDATA%\webclaw\policy.json`（或 `~/.webclaw/policy.json`）。只写精确主机名，不要 `*`。安装时也可：`$env:WEBCLAW_HOSTS='a.com,b.com'`。
 
 ## 升级
 

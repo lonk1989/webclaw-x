@@ -42,9 +42,18 @@ def local_url():
         httpd.shutdown()
         httpd.server_close()
 
+def _enable_empty_allowlist(home: Path) -> None:
+    """Opt-in fail-closed policy (product default is off)."""
+    (home / 'policy.json').write_text(
+        json.dumps({'enabled': True, 'allow_localhost': True, 'allowed_hosts': []}),
+        encoding='utf-8',
+    )
+
+
 @pytest.mark.parametrize('verb', ['打开', 'open', '打开标签'])
 def test_allowlist_denies_nonlisted_navigation(isolated, verb):
     # .invalid never resolves: runtime must deny before navigating/DNS.
+    _enable_empty_allowlist(isolated)
     out = as_envelope(asyncio.run(gw.webclaw_run(recipe=f'{verb} https://denied.invalid/path', title='policy-deny')))
     assert not out['ok']
     assert out['code'] == 'POLICY_DENIED', out
@@ -52,6 +61,7 @@ def test_allowlist_denies_nonlisted_navigation(isolated, verb):
 
 
 def test_probe_cannot_bypass_policy(isolated):
+    _enable_empty_allowlist(isolated)
     out = as_envelope(gw.webclaw_probe(url='https://denied.invalid'))
     assert not out['ok']
     assert out['code'] == 'POLICY_DENIED', out
@@ -59,13 +69,22 @@ def test_probe_cannot_bypass_policy(isolated):
 
 
 def test_raw_cli_enforces_policy(isolated):
+    _enable_empty_allowlist(isolated)
     p = subprocess.run([gw.BINARY, 'run', '--stdin'], input='打开https://denied.invalid',
                        env=gw._env(), capture_output=True, text=True, timeout=40)
     assert p.returncode != 0
     assert 'POLICY_DENIED' in p.stdout + p.stderr
 
 
-def test_localhost_allowed_by_default(isolated, local_url):
+def test_policy_off_by_default_allows_external(isolated):
+    # No policy.json → default enabled:false → external URL not POLICY_DENIED at gate.
+    # May still fail later on DNS/network; must not be POLICY_DENIED.
+    out = as_envelope(asyncio.run(gw.webclaw_run(
+        recipe='打开https://denied.invalid/path', title='policy-default-off')))
+    assert out.get('code') != 'POLICY_DENIED', out
+
+
+def test_localhost_still_works_without_policy_file(isolated, local_url):
     out = as_envelope(asyncio.run(gw.webclaw_run(recipe=f'打开{local_url}，采集表格', title='policy-local')))
     assert out['ok'] and out['code'] == 'OK', out
 

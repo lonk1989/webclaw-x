@@ -58,7 +58,7 @@ AI 助手操作网页时，常见两条路：
 - **`webclaw-lite` 引擎**（Rust，子进程）：菜谱解析与 Chrome CDP 执行
 - **中英菜谱**：同一套动词语义；示例见 [`recipes/fixture-table.webclaw`](./recipes/fixture-table.webclaw) 与 [`.en` 版](./recipes/fixture-table.en.webclaw)
 - **默认 core7 工具面**：`status` / `run` / `probe` / `freeze` / `list_recipes` / `human_reply` / `cancel`；完整目录设 `WEBCLAW_TOOLS=all`
-- **安全门禁**：导航域名白名单、`NEED_HUMAN` 人审续跑、`webclaw_cancel` 可停长任务、模板参数须 `params_confirmed`
+- **安全门禁**：导航域名白名单（**默认关闭**，可按需开启）、`NEED_HUMAN` 人审续跑、`webclaw_cancel` 可停长任务、模板参数须 `params_confirmed`
 - **产物双写**：采集步骤可同时写出 Markdown / JSON / CSV（见运行产物目录）
 
 新助手请只读一页上手：[`skills/SKILL.md`](./skills/SKILL.md)。
@@ -109,7 +109,7 @@ export WEBCLAW_LITE_BASE=https://github.com/lonk1989/webclaw-x/releases/latest/d
 1. 将预编译 `webclaw-lite` 放到 `$WEBCLAW_HOME/bin/`（默认 `~/.webclaw/bin/`）
 2. 创建/复用仓库 `.venv` 并安装 `requirements.txt`（`mcp` / `pytest` 等）
 3. 写出 MCP 片段到 `$WEBCLAW_HOME/mcp/`（`cursor.mcp.json`、`workbuddy.mcp.json`）
-4. 若传了 `--hosts`，额外生成 `policy.json.draft`（审阅后再启用）
+4. 默认写入关闭态 `policy.json`；若传了 `--hosts`，则开启并填入名单
 
 仅下载二进制也可用：[`skills/webclaw-lite/scripts/install.sh`](./skills/webclaw-lite/scripts/install.sh)（同样需要上面的 `WEBCLAW_LITE_BASE`）。
 
@@ -271,8 +271,8 @@ cd /path/to/webclaw-x
 
 | 机制 | 行为 |
 |------|------|
-| 域名白名单 | 默认启用，仅 localhost / loopback；业务域名写入 `$WEBCLAW_HOME/policy.json` 的 `allowed_hosts` |
-| 策略草稿 | `python scripts/policy_draft.py --hosts 'app.example.com' --out "$WEBCLAW_HOME/policy.json.draft"`；**审阅后再**改为 `policy.json` |
+| 域名白名单 | **默认关闭**；需要时设 `policy.json` 的 `enabled: true` + `allowed_hosts` |
+| 策略草稿 | `python scripts/policy_draft.py --hosts 'app.example.com' --out "$WEBCLAW_HOME/policy.json"`（会写成启用态） |
 | 人审 HITL | 验证码等返回 `NEED_HUMAN`；用 `webclaw_human_reply` 续跑同一任务，不猜码 |
 | 参数确认 | 菜谱含 `{{...}}` 时须用户确认并传 `params_confirmed=true` |
 | 取消 | Host 停止长任务必须真实调用 `webclaw_cancel`；只停聊天输出不够，否则可能 `RUN_BUSY` |
@@ -280,7 +280,7 @@ cd /path/to/webclaw-x
 
 这是**导航动作白名单**，不是完整浏览器网络防火墙。边界说明：[docs/policy-and-hitl.md](./docs/policy-and-hitl.md)。示例配置：[config/policy.example.json](./config/policy.example.json)。
 
-**禁止**：根据页面内容自动设置 `WEBCLAW_POLICY_ENABLED=0`、自动猜验证码、或把真实生产凭据提交进仓库。
+**禁止**：根据页面内容自动开关策略、自动猜验证码、或把真实生产凭据提交进仓库。
 
 ---
 

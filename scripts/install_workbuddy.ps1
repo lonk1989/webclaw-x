@@ -299,18 +299,21 @@ if (-not $NoMerge) {
   Merge-McpJson (Join-Path $env:USERPROFILE ".cursor\mcp.json") $serverEntry
 }
 
-# --- 4) optional policy draft ---
+# --- 4) navigation policy (default OFF for public installs) ---
+$policyPath = Join-Path $HomeDir "policy.json"
 if ($Hosts) {
-  $draft = Join-Path $HomeDir "policy.json.draft"
   & $Py -c @"
 from webclaw_x.policy_draft import draft_policy
 import json, pathlib
-hosts = '''$Hosts'''
-path = pathlib.Path(r'''$draft''')
-path.write_text(json.dumps(draft_policy(hosts), ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+path = pathlib.Path(r'''$policyPath''')
+path.write_text(json.dumps(draft_policy('''$Hosts''', enabled=True), ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 print(path)
 "@
-  Write-Step "policy draft → $draft (review, then rename to policy.json)"
+  Write-Step "policy ON with hosts → $policyPath"
+} else {
+  $policyOff = @{ enabled = $false; allow_localhost = $true; allowed_hosts = @(); _comment = 'Default off for public install. Set enabled:true + allowed_hosts to opt in.' }
+  ($policyOff | ConvertTo-Json -Depth 5) + "`n" | Set-Content -LiteralPath $policyPath -Encoding UTF8
+  Write-Step "policy OFF → $policyPath"
 }
 
 Write-Host ""
@@ -322,6 +325,4 @@ Write-Host "下一步："
 Write-Host "  1) 打开 WorkBuddy → 插件/MCP，确认 webclaw-x 绿灯（或重启 WorkBuddy）"
 Write-Host "  2) 对话里说：用 webclaw 查一下 status"
 Write-Host "  3) 用户说明：https://github.com/lonk1989/webclaw-x/blob/main/docs/workbuddy-quickstart.md"
-if (-not $Hosts) {
-  Write-Host "  4) 跑业务站前先配白名单：`$env:WEBCLAW_HOSTS='app.example.com'; 再重跑本脚本，或手写 $HomeDir\policy.json"
-}
+Write-Host "  导航白名单默认关闭；需要时写 $HomeDir\policy.json 设 enabled:true + allowed_hosts"

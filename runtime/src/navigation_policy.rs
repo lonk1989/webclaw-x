@@ -11,7 +11,8 @@ struct Policy {
 }
 impl Default for Policy {
     fn default() -> Self {
-        Self { enabled: true, allow_localhost: true, allowed_hosts: Vec::new() }
+        // Public / product default: off. Opt in via policy.json enabled:true + allowed_hosts.
+        Self { enabled: false, allow_localhost: true, allowed_hosts: Vec::new() }
     }
 }
 impl Policy {
@@ -58,7 +59,11 @@ mod tests {
     use super::*;
     #[test]
     fn hosts_are_exact_not_suffixes() {
-        let p = Policy { allowed_hosts: vec!["EXAMPLE.COM".into()], ..Policy::default() };
+        let p = Policy {
+            enabled: true,
+            allowed_hosts: vec!["EXAMPLE.COM".into()],
+            ..Policy::default()
+        };
         assert!(p.check("https://example.com/path").is_ok());
         assert!(p.check("https://example.com./path").is_ok());
         for url in ["https://example.com.evil.test", "https://sub.example.com", "https://example.com@evil.test", "file:///tmp/x", "javascript:alert(1)"] {
@@ -66,13 +71,19 @@ mod tests {
         }
     }
     #[test]
-    fn localhost_defaults_and_switch() {
-        let p = Policy::default();
+    fn default_is_off_opt_in_allowlist() {
+        let off = Policy::default();
+        assert!(!off.enabled);
+        assert!(off.check("https://not-allowed.invalid").is_ok());
+        let on = Policy {
+            enabled: true,
+            allow_localhost: true,
+            allowed_hosts: Vec::new(),
+        };
         for u in ["http://localhost:8000", "http://127.0.0.1:123", "http://[::1]:9000", "about:blank"] {
-            assert!(p.check(u).is_ok(), "{u}");
+            assert!(on.check(u).is_ok(), "{u}");
         }
-        assert!(p.check("https://not-allowed.invalid").is_err());
-        assert!(Policy { enabled: false, ..p }.check("https://not-allowed.invalid").is_ok());
+        assert!(on.check("https://not-allowed.invalid").is_err());
     }
     #[test]
     fn malformed_policy_is_not_silently_ignored() {

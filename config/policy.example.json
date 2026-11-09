@@ -1,5 +1,6 @@
 {
-  "enabled": true,
+  "enabled": false,
   "allow_localhost": true,
-  "allowed_hosts": ["example.com"]
+  "allowed_hosts": ["example.com"],
+  "_comment": "Default off. Set enabled:true to enforce allowed_hosts (exact match only)."
 }

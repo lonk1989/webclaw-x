@@ -151,10 +151,22 @@ TXT
   echo "[install] wrote MCP fragments → $MCP_DIR/"
 fi
 
-# --- 5) optional policy draft ---
+# --- 5) navigation policy (default OFF) ---
+POLICY_PATH="$HOME_DIR/policy.json"
 if [[ -n "$HOSTS" ]]; then
-  "$PY" "$REPO/scripts/policy_draft.py" --hosts "$HOSTS" --out "$HOME_DIR/policy.json.draft"
-  echo "[install] policy draft → $HOME_DIR/policy.json.draft (review before renaming to policy.json)"
+  "$PY" "$REPO/scripts/policy_draft.py" --hosts "$HOSTS" --out "$POLICY_PATH"
+  # policy_draft writes enabled:true — intentional opt-in allowlist when --hosts given
+  echo "[install] policy ON with hosts → $POLICY_PATH"
+else
+  cat > "$POLICY_PATH" <<'EOF'
+{
+  "enabled": false,
+  "allow_localhost": true,
+  "allowed_hosts": [],
+  "_comment": "Default off for public install. Set enabled:true + allowed_hosts to opt in."
+}
+EOF
+  echo "[install] policy OFF → $POLICY_PATH"
 fi
 
 echo
