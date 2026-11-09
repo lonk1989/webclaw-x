@@ -10,6 +10,28 @@
 
 ---
 
+## 普通用户（WorkBuddy / Cursor）— 一键安装
+
+不需要 clone、不需要 cargo、不需要蜂行客户端。本机有 **Chrome + Python 3.10+** 即可：
+
+**Windows（PowerShell）：**
+
+```powershell
+irm https://raw.githubusercontent.com/lonk1989/webclaw-x/main/scripts/install_workbuddy.ps1 | iex
+```
+
+**macOS / Linux：**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lonk1989/webclaw-x/main/scripts/install_workbuddy.sh | bash
+```
+
+脚本会下载预编译 lite、安装 MCP Host、并自动写入 WorkBuddy / Cursor 的 `mcp.json`。完整说明（白名单、升级、国内镜像）：
+
+→ **[`docs/workbuddy-quickstart.md`](./docs/workbuddy-quickstart.md)**
+
+---
+
 ## 它解决什么
 
 AI 助手操作网页时，常见两条路：
@@ -166,7 +188,8 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 - **常驻 stdio**：一个会话只拉起一次网关；不要每个工具调用都重新 spawn
 - 默认 `WEBCLAW_TOOLS=core`（约 7 个工具）；完整工具面设 `"WEBCLAW_TOOLS": "all"`
-- Cursor / WorkBuddy 配置说明见 [`docs/third-party-hosts.md`](./docs/third-party-hosts.md)
+- **普通用户请优先** [`docs/workbuddy-quickstart.md`](./docs/workbuddy-quickstart.md)（一键安装）
+- 开发者 / 契约细节见 [`docs/third-party-hosts.md`](./docs/third-party-hosts.md)
 
 手工启动（调试用）：
 
@@ -265,7 +288,7 @@ cd /path/to/webclaw-x
 
 | 项目 | 现状 |
 |------|------|
-| 预编译 Release | Linux：`webclaw-lite-linux-x64`（v0.2.0 已有）；Windows：`webclaw-lite-windows-x64.exe`（上传后可用） |
+| 预编译 Release | Win / macOS arm64 / Linux x64 lite；另附 `webclaw-x-host.zip`（MCP Host，供一键安装） |
 | MCP Host 执行菜谱 | 默认仍通过 **CLI 子进程** `run`；`WEBCLAW_LITE_USE_SERVE=1` 时优先常驻（`early_hitl`） |
 | `webclaw-lite serve` | Unix：socket；Windows：`127.0.0.1` TCP + `<WEBCLAW_HOME>/lite.sock` endpoint JSON；ops：ping/status/prewarm/run/cancel/human-reply/collect/quit。**不**作为默认 Host 路径 |
 | 跨进程任务互斥 / cancel | POSIX（Linux）更完整；Windows CLI/`serve cancel` 可用；Host 侧跨进程锁弱于 POSIX |
@@ -278,6 +301,7 @@ cd /path/to/webclaw-x
 
 | 文档 | 内容 |
 |------|------|
+| [docs/workbuddy-quickstart.md](./docs/workbuddy-quickstart.md) | **普通用户**一键安装（WorkBuddy / Cursor） |
 | [skills/SKILL.md](./skills/SKILL.md) | 新助手 1 页上手 + 真业务 checklist |
 | [docs/third-party-hosts.md](./docs/third-party-hosts.md) | 第三方 Host / MCP 接入与取消约定 |
 | [docs/policy-and-hitl.md](./docs/policy-and-hitl.md) | 域名策略与人审 |

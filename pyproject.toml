@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "webclaw-x"
+version = "0.2.1"
+description = "MCP gateway for deterministic browser RPA via webclaw-lite"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "lonk1989" }]
+keywords = ["mcp", "webclaw", "browser-rpa", "workbuddy", "cursor"]
+dependencies = [
+  "mcp>=1.0,<2.0",
+  "anyio>=4.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.urls]
+Homepage = "https://github.com/lonk1989/webclaw-x"
+Releases = "https://github.com/lonk1989/webclaw-x/releases"
+Documentation = "https://github.com/lonk1989/webclaw-x/blob/main/docs/workbuddy-quickstart.md"
+
+[project.scripts]
+webclaw-x = "webclaw_x.server:main"
+
+[tool.setuptools.packages.find]
+include = ["webclaw_x*"]
+exclude = ["runtime*", "skills*", "scripts*", "docs*", "recipes*", "patches*", "dist-windows*"]

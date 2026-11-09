@@ -80,3 +80,35 @@ jobs:
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Slim MCP host zip for end-user installers (no Rust tree).
+  release-host:
+    runs-on: ubuntu-latest
+    needs: []
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag != '' && inputs.tag || github.ref }}
+
+      - name: Stage webclaw-x-host.zip
+        run: |
+          set -euo pipefail
+          stage=$(mktemp -d)
+          mkdir -p "$stage"
+          cp -a webclaw_x "$stage/"
+          cp -a pyproject.toml requirements.txt README.md LICENSE "$stage/" 2>/dev/null || true
+          cp -a docs/workbuddy-quickstart.md "$stage/WORKBUDDY.txt" 2>/dev/null || true
+          (cd "$stage" && zip -r "$GITHUB_WORKSPACE/webclaw-x-host.zip" .)
+          sha256sum webclaw-x-host.zip | awk '{print tolower($1) "  webclaw-x-host.zip"}' | tr -d '\n' > webclaw-x-host.zip.sha256
+          ls -la webclaw-x-host.zip webclaw-x-host.zip.sha256
+
+      - name: Upload host zip to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag != '' && inputs.tag || github.ref_name }}
+          files: |
+            webclaw-x-host.zip
+            webclaw-x-host.zip.sha256
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

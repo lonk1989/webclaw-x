@@ -2,6 +2,8 @@
 
 > 目标：验证「第三方 Agent 只靠 MCP 契约就能写菜谱、回放、出产物」。
 > 日期：2026-11-06（Asia/Shanghai）
+>
+> **普通互联网用户请先看：[workbuddy-quickstart.md](./workbuddy-quickstart.md)**（一键安装，无需开发机）。本文偏契约与验收。
 
 ## 结论摘要
 

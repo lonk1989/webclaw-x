@@ -940,5 +940,11 @@ def webclaw_policy_draft(hosts: str, allow_localhost: bool = True) -> dict:
 # Default list_tools surface = core7; set WEBCLAW_TOOLS=all for full catalog.
 _TOOLS_MODE = apply_tool_visibility(mcp)
 
-if __name__ == "__main__":
+
+def main() -> None:
+    """Console entry (`webclaw-x` / `python -m webclaw_x.server`)."""
     mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()

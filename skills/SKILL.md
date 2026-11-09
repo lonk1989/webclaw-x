@@ -7,11 +7,23 @@
 
 ## 0. 发现 → 安装 → 接通（人/部署者）
 
+**互联网用户（推荐，无需 clone）：** 见 [`docs/workbuddy-quickstart.md`](../docs/workbuddy-quickstart.md)
+
+```powershell
+# Windows
+irm https://raw.githubusercontent.com/lonk1989/webclaw-x/main/scripts/install_workbuddy.ps1 | iex
+```
+
 ```bash
-# 默认：预编译 lite（~61MB），不要 cargo
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/lonk1989/webclaw-x/main/scripts/install_workbuddy.sh | bash
+```
+
+**已有仓库检出时：**
+
+```bash
 ./scripts/install_webclaw.sh
 # 产出：$WEBCLAW_HOME/bin/webclaw-lite  +  $WEBCLAW_HOME/mcp/*.mcp.json
-# 把 mcp 片段拷进 Cursor / WorkBuddy，重连并信任工具
 ```
 
 - 仅当**改引擎源码**才用 `./scripts/build_runtime.sh`（会生成巨大 `target/`，终端用户勿走）。
