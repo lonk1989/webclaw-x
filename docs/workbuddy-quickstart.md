@@ -112,6 +112,15 @@ $env:WEBCLAW_LITE_BASE = "https://your-cdn.example.com/webclaw-x/v0.2.1"
 $env:WEBCLAW_HOST_URL  = "https://your-cdn.example.com/webclaw-x-host.zip"
 ```
 
+## 站点账号（保险箱）
+
+密码不要发给模型。把导出文件放到约定路径后，webclaw 启动会自动探测（找不到就跳过）：
+
+- `%LOCALAPPDATA%\webclaw\host-exports\workbuddy.json`（推荐）
+- 或 `%USERPROFILE%\.workbuddy\webclaw-vault.json`
+
+格式见 [`host-vault-export.md`](./host-vault-export.md)。也可用 lite：`accounts ensure` / `accounts set`。
+
 ## 与蜂行客户端的区别
 
 | | 蜂行 / DSH 二次开发包 | 本页（WorkBuddy 等） |
@@ -119,6 +128,7 @@ $env:WEBCLAW_HOST_URL  = "https://your-cdn.example.com/webclaw-x-host.zip"
 | 分发 | 安装包内嵌 + 阿里云 OSS | 用户本机一键脚本 + GitHub/镜像 |
 | Host | Cordis 插件 `@lonk1989/webclaw` | Python MCP `webclaw_x` |
 | 配置 | `cordis.patch.yml` 的 `liteBaseUrl` | `mcp.json` 自动合并 |
+| 保险箱 | corp-auth 同步 + `host-exports/fengxing.json` | 用户/插件写 `host-exports/workbuddy.json` |
 
 ## 仍做不到的（已知边界）
 

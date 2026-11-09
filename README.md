@@ -302,6 +302,7 @@ cd /path/to/webclaw-x
 | 文档 | 内容 |
 |------|------|
 | [docs/workbuddy-quickstart.md](./docs/workbuddy-quickstart.md) | **普通用户**一键安装（WorkBuddy / Cursor） |
+| [docs/host-vault-export.md](./docs/host-vault-export.md) | Host 保险箱导出与启动探测 |
 | [skills/SKILL.md](./skills/SKILL.md) | 新助手 1 页上手 + 真业务 checklist |
 | [docs/third-party-hosts.md](./docs/third-party-hosts.md) | 第三方 Host / MCP 接入与取消约定 |
 | [docs/policy-and-hitl.md](./docs/policy-and-hitl.md) | 域名策略与人审 |

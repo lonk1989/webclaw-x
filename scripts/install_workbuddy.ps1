@@ -316,6 +316,13 @@ print(path)
   Write-Step "policy OFF → $policyPath"
 }
 
+# --- 5) quiet Host-vault probe (fengxing/WorkBuddy export drops) ---
+try {
+  & $Py -c "from webclaw_x.host_vault_probe import maybe_probe_on_startup; r=maybe_probe_on_startup(webclaw_home=r'''$HomeDir''', lite_bin=r'''$LiteDest'''); print(r.as_dict() if r else 'skipped')"
+} catch {
+  Write-Host "[webclaw-x] host-vault probe skipped: $($_.Exception.Message)" -ForegroundColor DarkYellow
+}
+
 Write-Host ""
 Write-Host "安装完成。" -ForegroundColor Green
 Write-Host "  lite:  $LiteDest"
@@ -326,3 +333,4 @@ Write-Host "  1) 打开 WorkBuddy → 插件/MCP，确认 webclaw-x 绿灯（或
 Write-Host "  2) 对话里说：用 webclaw 查一下 status"
 Write-Host "  3) 用户说明：https://github.com/lonk1989/webclaw-x/blob/main/docs/workbuddy-quickstart.md"
 Write-Host "  导航白名单默认关闭；需要时写 $HomeDir\policy.json 设 enabled:true + allowed_hosts"
+Write-Host "  站点账号：写入 $HomeDir\host-exports\workbuddy.json（见 docs/host-vault-export.md）"

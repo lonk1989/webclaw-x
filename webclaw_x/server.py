@@ -59,6 +59,15 @@ mcp = FastMCP("webclaw-x", instructions=INSTRUCTIONS)
 # Optional Chrome prewarm (WEBCLAW_PREWARM=1); default off — no semantic change.
 maybe_start_background()
 
+# Quiet Host-vault probe (fengxing / WorkBuddy / Doubao export paths). Skip if missing.
+# Disable: WEBCLAW_HOST_VAULT_PROBE=0
+try:
+    from webclaw_x.host_vault_probe import maybe_probe_on_startup  # noqa: E402
+
+    maybe_probe_on_startup(webclaw_home=HOME, lite_bin=BINARY if Path(BINARY).is_file() else None)
+except Exception:  # noqa: BLE001 — startup must not fail on probe
+    pass
+
 
 def _env() -> dict[str, str]:
     env = os.environ.copy()
@@ -935,6 +944,25 @@ def webclaw_policy_draft(hosts: str, allow_localhost: bool = True) -> dict:
         data={"draft": draft, "hint": "scripts/policy_draft.py --hosts '…' --out $WEBCLAW_HOME/policy.json.draft"},
     ))
 
+
+@mcp.tool()
+def webclaw_host_vault_probe() -> dict:
+    """Re-scan known Host vault export paths and merge into the local vault (no LLM secrets).
+
+    Quietly skips missing paths. Passwords are never returned. WEBCLAW_TOOLS=all.
+    """
+    from webclaw_x.host_vault_probe import probe_and_import
+
+    lite = BINARY if Path(BINARY).is_file() else None
+    result = probe_and_import(webclaw_home=HOME, lite_bin=lite, quiet=False)
+    return scrub_obj(
+        envelope(
+            ok=True,
+            code=ErrorCode.OK,
+            message="host vault probe done",
+            data=result.as_dict(),
+        )
+    )
 
 
 # Default list_tools surface = core7; set WEBCLAW_TOOLS=all for full catalog.

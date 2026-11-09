@@ -316,6 +316,8 @@ EOF
   step "policy OFF → $POLICY_PATH"
 fi
 
+"$PY" -c "from webclaw_x.host_vault_probe import maybe_probe_on_startup; r=maybe_probe_on_startup(webclaw_home=r'''$HOME_DIR''', lite_bin=r'''$LITE_DEST'''); print(r.as_dict() if r else 'skipped')" 2>/dev/null || true
+
 echo
 echo "安装完成。"
 echo "  lite:  $LITE_DEST"
@@ -324,3 +326,4 @@ echo "  home:  $HOME_DIR"
 echo "下一步：重启 WorkBuddy，确认 webclaw-x 绿灯；对话「用 webclaw 查一下 status」"
 echo "说明：https://github.com/lonk1989/webclaw-x/blob/main/docs/workbuddy-quickstart.md"
 echo "导航白名单默认关闭；需要时编辑 $POLICY_PATH"
+echo "站点账号：写入 $HOME_DIR/host-exports/workbuddy.json（见 docs/host-vault-export.md）"
