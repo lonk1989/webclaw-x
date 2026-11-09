@@ -1,227 +1,308 @@
 # webclaw-x
 
-webclaw **二次改造** 主仓（monorepo）：硬化 MCP 网关 + 内嵌 Rust `runtime/`（`webclaw-lite`）+ L1 契约验收 + fixture 评测。
+确定性浏览器 RPA：用**菜谱**驱动 Chrome（CDP），通过 **MCP** 交给 Cursor / WorkBuddy 等 AI 助手执行。
 
-上游引擎源自 MIT 的 [webclaw-oss](https://github.com/lonk1989/webclaw-oss)；本仓以 **x 为主** 收纳 `runtime/`，Host 仍 subprocess 调用 lite（不揉成单进程）。关系与归因见 [FORK.md](./FORK.md)、`runtime/PROVENANCE.md`。本地 `/workspace/webclaw-oss` 保留作镜像/对照，默认不删。
+菜谱 = **指令（动词）** + **目标/参数**；中英动词同一回放路径（如 `打开`/`open`、`等待`/`wait`、`采集`/`collect`）。
 
-**菜谱语义**：一步 = **指令（verb）** + **目标/参数（args）**；中英动词同一套回放（`打开`/`open`、`等待`/`wait`、`采集`/`collect` …）。示例见 `recipes/fixture-table.webclaw` 与 `recipes/fixture-table.en.webclaw`。
+> 仓库：<https://github.com/lonk1989/webclaw-x>  
+> 当前发布：[v0.2.1](https://github.com/lonk1989/webclaw-x/releases/tag/v0.2.1)（预编译：Windows x64；Linux 见 v0.2.0；macOS 请本机源码构建）
 
-## 安装（终端用户默认：预编译）
+---
 
-**不要**一上来 `cargo build`。预编译 `webclaw-lite` 约 **61MB**；从源码编译会在本机留下数 GB 级的 `target/`，只适合改引擎的人。
+## 它解决什么
+
+AI 助手操作网页时，常见两条路：
+
+- 让模型逐步点页面（慢、不稳定、难复现）
+- 手写 Playwright / CSS 选择器（一改版就碎）
+
+**webclaw-x** 走第三条：先把流程写成可冻结的菜谱，再由助手 **一次** `webclaw_run` 回放。适合登录后的业务页面、表格采集、需要人机确认（验证码）的流程。
+
+## 适用 / 不适用
+
+| 适合 | 不适合 |
+|------|--------|
+| 给 AI 助手挂确定性浏览器工具 | 当作通用无头爬虫 / 反爬对抗框架 |
+| 本地或可控环境的业务回放 | 企业级云端会话托管、多租户 SaaS |
+| fixture → 冻结菜谱 → 反复跑 | 每一步都靠模型现场猜选择器 |
+| 需要域名白名单、取消、人审的场景 | 绕过站点安全策略或自动化猜验证码 |
+
+非目标（详见 [FORK.md](./FORK.md)）：不重写 CDP 运行时；不把 MCP Host 与 `webclaw-lite` 揉成单进程；仓库不携带真实业务凭据。
+
+## 核心能力
+
+- **MCP 网关**（`webclaw_x`）：统一工具信封、脱敏、任务取消、参数确认门禁
+- **`webclaw-lite` 引擎**（Rust，子进程）：菜谱解析与 Chrome CDP 执行
+- **中英菜谱**：同一套动词语义；示例见 [`recipes/fixture-table.webclaw`](./recipes/fixture-table.webclaw) 与 [`.en` 版](./recipes/fixture-table.en.webclaw)
+- **默认 core7 工具面**：`status` / `run` / `probe` / `freeze` / `list_recipes` / `human_reply` / `cancel`；完整目录设 `WEBCLAW_TOOLS=all`
+- **安全门禁**：导航域名白名单、`NEED_HUMAN` 人审续跑、`webclaw_cancel` 可停长任务、模板参数须 `params_confirmed`
+- **产物双写**：采集步骤可同时写出 Markdown / JSON / CSV（见运行产物目录）
+
+新助手请只读一页上手：[`skills/SKILL.md`](./skills/SKILL.md)。
+
+---
+
+## 先决条件
+
+- **操作系统（当前现实）**
+  - **Linux x86_64**：预编译主路径（`webclaw-lite-linux-x64`）
+  - **Windows x64（原生 CLI）**：可用预编译 `webclaw-lite-windows-x64.exe`（见下方安装）；`webclaw-lite serve` 已支持（loopback TCP + endpoint 文件），Host 默认仍走 CLI，需 opt-in
+  - **WSL2**：可继续按 Linux 路径安装
+  - **macOS**：源码在仓内；当前 Release **仍无** macOS 预编译附件
+- **软件**：Python 3.10+、Google Chrome（或 Chromium）、`curl`（安装脚本下载用）
+- **AI Host**：支持自定义 stdio MCP 的客户端（Cursor、WorkBuddy 等）
+- **不要**把 `cargo build` 当作终端用户安装路径（会生成数 GB 的 `target/`，仅改引擎源码时需要）
+
+---
+
+## 安装（终端用户：预编译）
+
+安装脚本默认下载源仍指向旧仓 `webclaw-oss`。安装 **本仓 v0.2.0** 时请显式设置：
+
+```bash
+export WEBCLAW_LITE_BASE=https://github.com/lonk1989/webclaw-x/releases/latest/download
+```
+
+当前该前缀下规划的预编译文件：
+
+- `webclaw-lite-linux-x64` / `.sha256`（v0.2.0 已发布）
+- `webclaw-lite-windows-x64.exe` / `.sha256`（Windows CLI 构建产物；由发布流程上传后可用）
+- 另可选打包：`webclaw-lite-windows-x64.zip`（含 exe + `README-WINDOWS.txt` + checksum）
+
+### Linux / WSL2（推荐）
+
+```bash
+git clone https://github.com/lonk1989/webclaw-x.git
+cd webclaw-x
+
+export WEBCLAW_LITE_BASE=https://github.com/lonk1989/webclaw-x/releases/latest/download
+./scripts/install_webclaw.sh
+# 可选：写出业务域名草稿（不会自动放行全世界）
+# ./scripts/install_webclaw.sh --hosts 'app.example.com,login.example.com'
+```
+
+脚本会：
+
+1. 将预编译 `webclaw-lite` 放到 `$WEBCLAW_HOME/bin/`（默认 `~/.webclaw/bin/`）
+2. 创建/复用仓库 `.venv` 并安装 `requirements.txt`（`mcp` / `pytest` 等）
+3. 写出 MCP 片段到 `$WEBCLAW_HOME/mcp/`（`cursor.mcp.json`、`workbuddy.mcp.json`）
+4. 若传了 `--hosts`，额外生成 `policy.json.draft`（审阅后再启用）
+
+仅下载二进制也可用：[`skills/webclaw-lite/scripts/install.sh`](./skills/webclaw-lite/scripts/install.sh)（同样需要上面的 `WEBCLAW_LITE_BASE`）。
+
+macOS 若日后提供附件并下载成功，Gatekeeper 阻挡时可执行：
+
+```bash
+xattr -d com.apple.quarantine ~/.webclaw/bin/webclaw-lite
+```
+
+### 原生 Windows x64（CLI）
+
+终端用户**不需要 cargo**。默认从本仓 Release 拉预编译：
+
+```powershell
+# 可选显式指定（install.ps1 默认已指向 webclaw-x）
+$env:WEBCLAW_LITE_BASE = "https://github.com/lonk1989/webclaw-x/releases/latest/download"
+powershell -ExecutionPolicy Bypass -File .\skills\webclaw-lite\scripts\install.ps1
+
+# 写出 MCP 片段（需本仓 checkout + Python venv）
+powershell -ExecutionPolicy Bypass -File .\skills\webclaw-lite\scripts\write_mcp_fragment.ps1
+```
+
+支持边界（请按此预期使用）：
+
+- **已验证路径**：`status` / `run`（中英菜谱）/ `cancel` / `human-reply`（HITL 暂停与回写）/ 域名白名单拒绝
+- **常驻 serve（opt-in）**：先启动 `webclaw-lite serve`，再设 `WEBCLAW_LITE_USE_SERVE=1`；默认仍 CLI。不可达时回退 CLI **一次**（不双跑）。关闭：去掉该环境变量或 `quit`/结束 serve 进程
+- Host MCP 默认仍通过 **CLI 子进程** 调 lite；跨进程任务锁在 Windows 上弱于 POSIX，长任务停止请真实调用 `cancel`
+- 需要 VC++ 运行库（`MSVCP140` / `VCRUNTIME140`）；可选 OCR 依赖本机 DirectML/DX12 与模型文件
+- 下载前请确认 Release 已实际上传 `webclaw-lite-windows-x64.exe`；**未上传时安装脚本会失败**，这是预期行为，不是“已支持”假绿
+
+### 开发者（仅改引擎时）
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+./scripts/build_runtime.sh   # 编译并安装到 ~/.webclaw/bin/；会留下很大的 target/
+```
+
+---
+
+## 接通 MCP
+
+把安装脚本生成的片段合并进 Host 的 `mcp.json`，然后**重连并信任工具**。路径请换成你本机的实际位置：
+
+```json
+{
+  "mcpServers": {
+    "webclaw-x": {
+      "command": "/path/to/webclaw-x/.venv/bin/python",
+      "args": ["-m", "webclaw_x.server"],
+      "env": {
+        "PYTHONPATH": "/path/to/webclaw-x",
+        "WEBCLAW_LITE_BIN": "/home/YOU/.webclaw/bin/webclaw-lite",
+        "WEBCLAW_HOME": "/home/YOU/.webclaw",
+        "WEBCLAW_HEADLESS": "0",
+        "WEBCLAW_TOOLS": "core",
+        "WEBCLAW_STATUS_MODE": "fast"
+      }
+    }
+  }
+}
+```
+
+要点：
+
+- **常驻 stdio**：一个会话只拉起一次网关；不要每个工具调用都重新 spawn
+- 默认 `WEBCLAW_TOOLS=core`（约 7 个工具）；完整工具面设 `"WEBCLAW_TOOLS": "all"`
+- Cursor / WorkBuddy 配置说明见 [`docs/third-party-hosts.md`](./docs/third-party-hosts.md)
+
+手工启动（调试用）：
 
 ```bash
 cd /path/to/webclaw-x
-
-# 一键：拉预编译 lite → venv/mcp → 写出 mcp.json 片段
-./scripts/install_webclaw.sh
-# 可选业务域名草稿（不会自动放行全世界）：
-# ./scripts/install_webclaw.sh --hosts 'app.example.com,login.example.com'
-
-# 片段在 $WEBCLAW_HOME/mcp/（默认 ~/.webclaw/mcp/）
-# 拷进 Cursor / WorkBuddy 的 mcp.json 后重连并信任工具
+export PYTHONPATH=.
+export WEBCLAW_LITE_BIN="$HOME/.webclaw/bin/webclaw-lite"
+export WEBCLAW_HOME="$HOME/.webclaw"
+.venv/bin/python -m webclaw_x.server
 ```
 
-仅下载 lite：`skills/webclaw-lite/scripts/install.sh`（或 Windows `install.ps1`）。  
-macOS Gatekeeper：`xattr -d com.apple.quarantine ~/.webclaw/bin/webclaw-lite`。
+二进制查找顺序：`WEBCLAW_LITE_BIN` → 仓内 `target/release/webclaw-lite` → `bin-webclaw-lite` → `~/.webclaw/bin/webclaw-lite`。
 
-手工接通时：
+### 可选：常驻 serve（减少重复拉起引擎）
 
-```bash
-export PYTHONPATH=/path/to/webclaw-x
-export WEBCLAW_LITE_BIN=$HOME/.webclaw/bin/webclaw-lite
-export WEBCLAW_HOME=$HOME/.webclaw
-export WEBCLAW_TOOLS=core          # 默认；完整工具面设 all
-export WEBCLAW_HEADLESS=1          # 无头冒烟；演示可改 0
-PYTHONPATH=. .venv/bin/python -m webclaw_x.server
+默认保持 CLI，稳定性优先。需要常驻时：
+
+```powershell
+# 1) 另开终端启动 daemon（Windows 写 endpoint JSON 到 %WEBCLAW_HOME%\lite.sock）
+$env:WEBCLAW_HOME = "$env:LOCALAPPDATA\webclaw"
+& "$env:WEBCLAW_HOME\bin\webclaw-lite.exe" serve
+
+# 2) MCP env 增加（写在 mcp.json 的 env 里）
+#    WEBCLAW_LITE_USE_SERVE=1
+#    可选 WEBCLAW_LITE_SOCKET=<endpoint 文件路径>
 ```
 
-二进制查找顺序：`WEBCLAW_LITE_BIN` → 仓内 `target/release` → `bin-webclaw-lite` → `~/.webclaw/bin`。
+回退与限制：
 
-### 附录：开发者从源码编 lite
+- **关闭**：去掉 `WEBCLAW_LITE_USE_SERVE`，或向 serve 发 `quit` / 结束进程
+- **回退**：endpoint 缺失或连接失败时 Host 回退 CLI；**同一业务 run 不会在 serve 失败后再用 CLI 重跑一遍**（仅当 serve 完全不可达、尚未接到 run 时走 CLI）
+- Host 走 serve 时 `run` 带 `early_hitl`：人审先返回 `NEED_HUMAN`，再用 `webclaw_human_reply`（内部 serve `human-reply`/`collect`）续跑
+- 常驻主要省进程/模型加载成本；**不要**把网页等待算作引擎提速，也不假设模型常驻必然加快单次推理
 
-```bash
-export PATH="$HOME/.cargo/bin:$PATH"
-./scripts/build_runtime.sh   # → ~/.webclaw/bin/webclaw-lite，并产生巨大 target/
-```
+---
 
-### 首载约定（Agent / 第三方 Host）
+## 最小示例（本地 fixture，无真实站点）
 
-- **常驻 stdio**：禁止每工具 respawn；评测用 `scripts/call_tool.py --persist …`
-- **status 热路径**：默认不 spawn lite（`WEBCLAW_STATUS_MODE=fast`）；`WEBCLAW_STATUS_MODE=lite` 才走 CLI
-- **可选预热**：`WEBCLAW_PREWARM=1` 在网关启动时后台确保 CDP 就绪
-- Skill 与 MCP instructions 共用 `webclaw_x/fast_card.py` 一张快卡，勿叠读 lite/伙伴 Skill 全文
-- **工具面**：默认 `WEBCLAW_TOOLS=core`（约 7 个）；`WEBCLAW_TOOLS=all` 暴露完整目录（含 recipe_* / accounts / policy_draft 等）
-- **新助手入口**：只读 [`skills/SKILL.md`](./skills/SKILL.md)（含真业务 checklist）
-- **policy 草稿**：`python scripts/policy_draft.py --hosts '…' --out $WEBCLAW_HOME/policy.json.draft`（审阅后才改名 `policy.json`）
-- **登录态**：默认复用健康 CDP；`WEBCLAW_PREWARM=1` 可选预热；`WEBCLAW_CHROME_RECYCLE=1` 才强制冷启
-- **lite serve**（Unix）：`webclaw-lite serve` 支持 ping/status/prewarm/**run/cancel**；OCR 模型在同进程二次 run 可复用；Windows serve 未就绪
+仓库自带静态站 [`fixtures/site/`](./fixtures/site/) 与冻结菜谱，不需要业务账号。
 
-### 启动 MCP（stdio）
-
-```bash
-cd /workspace/webclaw-x
-PYTHONPATH=. .venv/bin/python -m webclaw_x.server
-```
-
-WorkBuddy / Cursor 配置示例见 [docs/third-party-hosts.md](./docs/third-party-hosts.md)。
-
-## 一键总回归看板（P1 收口）
-
-```bash
-cd /workspace/webclaw-x
-source .venv/bin/activate  # 本机 python 由现有 venv 提供
-python scripts/eval_all.py
-```
-
-自动使用本仓 `.venv`，按 L1 → components → policy → recipe_lib → selfheal → L2 串行跑现有评测，避免共享 CDP 冲突。输出 `eval/out/dashboard.json` 与极简表格 `eval/out/dashboard.md`，包含每套件状态、passed/failed、耗时、原报告路径及日志。汇总计数含 L1/专项的重复执行，非去重用例数；仅全部 green 返回 0，yellow/red 返回 1。缺失/未更新的旧报告不会误记 green。运行时看板状态为 running；请勿同时启动独立 eval。
-
-快速检查看板逻辑（不启动浏览器）：`python -m unittest discover -s scripts -p test_eval_all.py`。
-
-## 跑 L1 验收 / 看报告
-
-```bash
-cd /workspace/webclaw-x
-python scripts/eval_smoke.py
-# 或
-bash scripts/eval_smoke.sh
-
-# 报告
-cat eval/out/latest.json
-```
-
-状态含义：
-
-| status | 含义 |
-|--------|------|
-| green | 断言全过 |
-| yellow | 仅有合理 skip（或环境性 xfail）；P0 现目标为 green |
-| red | 硬失败 |
-
-也可直接：
-
-```bash
-PYTHONPATH=. .venv/bin/python -m pytest tests/ -q
-```
-
-
-## L2 MCP Client（无大模型黑盒）
-
-```bash
-cd /workspace/webclaw-x
-export PATH="$HOME/.cargo/bin:$PATH"
-export WEBCLAW_LITE_BIN=$HOME/.webclaw/bin/webclaw-lite
-export WEBCLAW_HEADLESS=1
-.venv/bin/python scripts/l2_mcp_client.py
-cat eval/out/l2-client.json
-```
-
-通过 stdio 拉起 `python -m webclaw_x.server`，直接调工具跑 V-01/V-02/V-03，不经 LLM。
-
-## 最新验收
-
-Host 契约加固后实测全部 **green**：L1 86 passed（含新增 Host 契约 37 项；0 failed / xfailed / skipped）；L2 7、components 2、policy 11、recipe-library 18、Self-Heal 10 passed。Rust 错误码单测 2 passed，release 已同步。看板：`eval/out/dashboard.json` / `dashboard.md`（2026-11-06 13:44，Asia/Shanghai；各套件有重复执行，不是 134 个去重用例）。
+**中文菜谱**（[`recipes/fixture-table.webclaw`](./recipes/fixture-table.webclaw)）：
 
 ```text
-export PATH="$HOME/.cargo/bin:$PATH"
-python scripts/eval_smoke.py          # L1 → eval/out/latest.json（目标 green）
-python scripts/l2_mcp_client.py       # L2 → eval/out/l2-client.json（目标 green）
-python scripts/eval_components.py     # P1 组件包 → eval/out/components.json
-python scripts/eval_policy.py         # P1 策略/HITL → eval/out/policy.json
-python scripts/eval_recipe_lib.py     # P1 版本库 → eval/out/recipe-library.json
-python scripts/eval_selfheal.py       # P1 单步自愈 → eval/out/selfheal.json
-# runtime 已纳入本仓 runtime/；编译见 ./scripts/build_runtime.sh
-# 回滚与上游归因见 FORK.md
+打开http://127.0.0.1:8765/table.html，等待文字加油记录5，采集表格
 ```
 
-## 验收用例（L1）
+**英文等价**（[`recipes/fixture-table.en.webclaw`](./recipes/fixture-table.en.webclaw)）：
 
-| ID | 内容 | 说明 |
-|----|------|------|
-| V-01 | `webclaw_status` | 二进制/Chrome 健康检查 |
-| V-02 | 冻结菜谱 run | 使用 **本地 fixture HTML**（非内网 MES） |
-| V-03 | 模糊「点击确定」 | 期望 `AMBIGUOUS_TARGET`（patch 0001 已编进二进制） |
-| V-04 | HITL | 本地 FileHumanBridge 实测暂停/回复/续跑；真实验证码仍须人处理 |
-| V-05 | probe→freeze→二次 run | fixture |
-
-Fixture 站点：`fixtures/site/`（login / table / ambiguous）。
-
-## 表格双写
-
-**Runtime 一等产物**（已沉到 Rust）：`采集` / `采集表格` 在 `runs/*/documents/` 同时写出：
-
-- `页面采集-*.md`
-- `页面采集-*.tables.json`
-- `页面采集-*.csv`（多表时 `*.1.csv` …）
-
-MCP 层 `webclaw_x/dualwrite.py` 仅作旧二进制回退补写。
-
-## 关键路径
-
-```
-webclaw_x/server.py     MCP 网关（统一错误码、脱敏、Skill 指令、双写）
-webclaw_x/scrub.py      密码/验证码脱敏
-webclaw_x/dualwrite.py  MD 表 → JSON/CSV（旧二进制回退）
-scripts/l2_mcp_client.py  L2 stdio 黑盒 Client
-webclaw_x/errors.py     ErrorCode 契约
-tests/                  L1 + 单测
-scripts/eval_smoke.py   一键评测
-docs/third-party-hosts.md   WorkBuddy 等
-docs/component-pack.md      P1 日期/下拉/分页
-docs/self-heal.md           P1 单步自愈阶梯
-scripts/eval_selfheal.py    自愈自动验收
-docs/ambiguity-design.md    定位冲突设计
-patches/                Rust 补丁说明
-skills/SKILL.md         给 Host Agent 的用法
+```text
+open http://127.0.0.1:8765/table.html, wait 加油记录5, collect table
 ```
 
-## 许可
+在已接通的 MCP 会话中：
 
-MIT — 见 [LICENSE](./LICENSE)。
+1. 调用一次 `webclaw_status`
+2. 调用一次 `webclaw_list_recipes`
+3. 对完整菜谱调用一次 `webclaw_run`（**禁止**拆成逐步 `probe`）
 
-## P1 域名策略 + HITL
-
-默认导航白名单开启，仅 localhost/loopback 放行。配置 `$WEBCLAW_HOME/policy.json` 的 `allowed_hosts` 可开放具体 host；部署者可用 `WEBCLAW_POLICY_ENABLED=0` 关闭。不是完整浏览器网络防火墙，边界见 [policy-and-hitl.md](docs/policy-and-hitl.md)。
+CLI 评测入口（可选）：
 
 ```bash
-.venv/bin/python scripts/eval_policy.py  # → eval/out/policy.json
+cd /path/to/webclaw-x
+.venv/bin/python scripts/eval_smoke.py
+# 或常驻调用：
+.venv/bin/python scripts/call_tool.py --persist webclaw_status '{}'
 ```
 
-`NEED_HUMAN` 返回时 CLI 保持运行；把返回的 `run_id` / `need_human.prompt_id` 连同人类回复交给 `webclaw_human_reply`，原任务续跑。同一 `WEBCLAW_HOME` 跨进程单活跃 run（POSIX 文件锁，冲突返回 `RUN_BUSY`），不重放归档验证码。
+真业务开跑前，请按 [`skills/SKILL.md`](./skills/SKILL.md) 勾完 checklist（policy / 参数确认 / HITL / cancel / 禁逐步 probe）。
 
-## P1 菜谱库版本管理
+### 菜谱动词（MVP）
 
-新增不可覆盖版本库（正整数自动升版、tags/read_only/default parameters）与共享环境绑定；旧 `recipes/*.webclaw` 保持兼容。
+`打开`/`open` · `点击`/`click` · `等待`/`wait` · `输入`/`type` · `采集`/`collect` · `刷新`/`reload` · `截图`/`screenshot` · `滚动`/`scroll` · `按`/`press` · `参数`/`param`
 
-```bash
-.venv/bin/python -m webclaw_x.recipe_library --help
-.venv/bin/python scripts/eval_recipe_lib.py # eval/out/recipe-library.json
+编排期可用 `probe` → `freeze` 固化；稳定后回放只走 `run`。
+
+---
+
+## 安全、白名单、人审与取消
+
+| 机制 | 行为 |
+|------|------|
+| 域名白名单 | 默认启用，仅 localhost / loopback；业务域名写入 `$WEBCLAW_HOME/policy.json` 的 `allowed_hosts` |
+| 策略草稿 | `python scripts/policy_draft.py --hosts 'app.example.com' --out "$WEBCLAW_HOME/policy.json.draft"`；**审阅后再**改为 `policy.json` |
+| 人审 HITL | 验证码等返回 `NEED_HUMAN`；用 `webclaw_human_reply` 续跑同一任务，不猜码 |
+| 参数确认 | 菜谱含 `{{...}}` 时须用户确认并传 `params_confirmed=true` |
+| 取消 | Host 停止长任务必须真实调用 `webclaw_cancel`；只停聊天输出不够，否则可能 `RUN_BUSY` |
+| 脱敏 | 密码 / 验证码不应写入菜谱或聊天明文；密码走 accounts 金库路径 |
+
+这是**导航动作白名单**，不是完整浏览器网络防火墙。边界说明：[docs/policy-and-hitl.md](./docs/policy-and-hitl.md)。示例配置：[config/policy.example.json](./config/policy.example.json)。
+
+**禁止**：根据页面内容自动设置 `WEBCLAW_POLICY_ENABLED=0`、自动猜验证码、或把真实生产凭据提交进仓库。
+
+---
+
+## 平台与已知限制
+
+| 项目 | 现状 |
+|------|------|
+| 预编译 Release | Linux：`webclaw-lite-linux-x64`（v0.2.0 已有）；Windows：`webclaw-lite-windows-x64.exe`（上传后可用） |
+| MCP Host 执行菜谱 | 默认仍通过 **CLI 子进程** `run`；`WEBCLAW_LITE_USE_SERVE=1` 时优先常驻（`early_hitl`） |
+| `webclaw-lite serve` | Unix：socket；Windows：`127.0.0.1` TCP + `<WEBCLAW_HOME>/lite.sock` endpoint JSON；ops：ping/status/prewarm/run/cancel/human-reply/collect/quit。**不**作为默认 Host 路径 |
+| 跨进程任务互斥 / cancel | POSIX（Linux）更完整；Windows CLI/`serve cancel` 可用；Host 侧跨进程锁弱于 POSIX |
+| 默认工具面 | `WEBCLAW_TOOLS=core`；`all` 才暴露 recipe 库 / accounts / `policy_draft` 等 |
+| 可选预热 | `WEBCLAW_PREWARM=1`；强制冷启 Chrome：`WEBCLAW_CHROME_RECYCLE=1` |
+
+---
+
+## 文档导航
+
+| 文档 | 内容 |
+|------|------|
+| [skills/SKILL.md](./skills/SKILL.md) | 新助手 1 页上手 + 真业务 checklist |
+| [docs/third-party-hosts.md](./docs/third-party-hosts.md) | 第三方 Host / MCP 接入与取消约定 |
+| [docs/policy-and-hitl.md](./docs/policy-and-hitl.md) | 域名策略与人审 |
+| [docs/recipe-library.md](./docs/recipe-library.md) | 菜谱版本库 |
+| [docs/self-heal.md](./docs/self-heal.md) | 单步自愈（默认关闭） |
+| [docs/component-pack.md](./docs/component-pack.md) | 日期 / 下拉 / 分页等组件 |
+| [docs/ambiguity-design.md](./docs/ambiguity-design.md) | 定位歧义（`AMBIGUOUS_TARGET`） |
+| [FORK.md](./FORK.md) | 与上游关系、非目标、回滚线索 |
+| [runtime/PROVENANCE.md](./runtime/PROVENANCE.md) | `runtime/` 出处 |
+
+评测与回归脚本在 `scripts/`（如 `eval_smoke.py`、`eval_all.py`）；本地测试可用 `pytest`。报告数字会随环境和版本变化，**不以历史看板数字作为永久保证**。
+
+---
+
+## 仓库结构（简图）
+
+```text
+webclaw_x/          Python MCP 网关
+runtime/            内嵌 webclaw-lite（Rust）源码
+scripts/            安装、评测、policy 草稿、工具调用
+skills/SKILL.md     给 AI Host 的一页上手
+recipes/            fixture 菜谱
+fixtures/site/      本地静态演示站
+docs/               设计与接入说明
+examples/           更多示例与编写指南
 ```
 
-MCP：`webclaw_recipe_publish/list/get/bind_env/diff`；回放 `webclaw_run(recipe_ref="name@1", environment="fixture", params_confirmed=true)`。
-环境只替换 `{{base_url}}` 等模板参数，不复制正文，也不自动放开域名策略。完整示例见 [recipe-library.md](docs/recipe-library.md)。
+---
 
-## P1 自愈阶梯（单步、默认关闭）
+## 贡献与问题反馈
 
-```bash
-.venv/bin/python scripts/eval_selfheal.py # eval/out/selfheal.json
-```
+- Bug、安装问题、功能建议：请到 GitHub [Issues](https://github.com/lonk1989/webclaw-x/issues) 开单
+- 安全相关疑虑：同样先开 Issue 描述影响面（仓库暂无独立 `SECURITY.md`）
+- 提交 PR 前请说明动机、复现/验证步骤；大改动建议先开 Issue 对齐范围
+- 仓内暂无 `CONTRIBUTING.md` / CI badge；以 Issue 与审阅讨论为准
 
-配置 `$WEBCLAW_HOME/heal.json` / `WEBCLAW_HEAL_FILE`，示例 [config/heal.example.json](config/heal.example.json)。默认关闭；`WEBCLAW_HEAL_ENABLED=0` 可强制停用。只对失败的只读步骤依次短重试→可选刷新→显式结构等待→可选 HITL；从不重跑整菜谱，不重试点击/输入等动作，也不绕过白名单或歧义。耗尽返回 `NEED_REPAIR`，AI 只保留有界接口（本轮调用 0 次）。配置、可测行为与边界见 [docs/self-heal.md](docs/self-heal.md)。所有浏览器评测需串行。
+## 许可与上游归因
 
-## Host 契约加固（WorkBuddy 点评后）
-
-- 含 `{{...}}` 的正文/路径/版本菜谱，网关要求 `params_confirmed=true`，否则返回 `PARAMS_UNCONFIRMED` 与参数名，不启动 lite；无占位符不受影响。Host 必须先真实询问用户，密码仍走金库。
-- `webclaw_list_recipes` 与 `webclaw_recipe_list` 均返回平铺 + 版本库的 `data.recipes`，含 source/version/tags/参数名摘要；原工具名保留；旧 `data.stdout_tail` 兼容视图已 deprecated，请只读结构化字段。
-- lite 失败 `done.error_code` 优先于日志解析；策略拒绝/定位歧义/CDP 超时使用稳定码；旧二进制仍有日志兼容回退。
-- 运行中的 WorkBuddy MCP 需重启/重连以加载网关；不改 mcp.json。豆包验证留待下一轮。
-
-
-### Host 生命周期加固（2026-11-06）
-
-- 活跃任务原子落盘于 `WEBCLAW_HOME/jobs/<run_id>.json`，记录 PID/PGID、启动时间、状态等；不保存菜谱正文、参数或秘密。
-- 共享同一 home 的不同 stdio 会话，可调用 `webclaw_cancel`（可选 `run_id`）停止同一任务。SIGTERM 等 0.5 秒后必要时 SIGKILL；完成、超时、取消均清理任务 JSON。
-- scan → spawn → register 在同一 `flock` 事务中；冲突拒绝 `RUN_BUSY`，不排队等待整个 run。死亡 PID 自动清理；损坏元数据则 fail-closed 返回 `INTERNAL`，请部署者审阅，勿盲目删除活跃记录。
-- `webclaw_status` 直接读 `data.bin / data.chrome / data.chromeOk / data.version / …`；`webclaw_list_recipes` 读 `data.recipes`。二者的 `stdout_tail` 是 deprecated 兼容字段，不再作为新 Host 契约。
-- 需重连所有网关进程；新旧进程混用不能保证互斥。互斥范围是同一 home，不是同一 CDP 端口；不同 home 共用 Chrome 仍需部署隔离。
-- 当前跨进程实现面向 POSIX（Linux 本轮验证），原生 Windows 尚需锁/进程组适配。详情见 `docs/third-party-hosts.md`。
+- 本仓库采用 **MIT** 许可，见 [LICENSE](./LICENSE)
+- 浏览器引擎源自 MIT 项目 [webclaw-oss](https://github.com/lonk1989/webclaw-oss)；本仓以 monorepo 形式收纳 `runtime/`，MCP Host 仍通过子进程调用 lite
+- 关系、查找路径与非目标见 [FORK.md](./FORK.md) 与 [runtime/PROVENANCE.md](./runtime/PROVENANCE.md)

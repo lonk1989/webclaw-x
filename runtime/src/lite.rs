@@ -81,7 +81,7 @@ pub fn print_usage() {
   webclaw-lite install
   webclaw-lite status [--run-id <id>]
   webclaw-lite prewarm
-  webclaw-lite serve [--socket <path>]   # daemon：ping/status/prewarm/run/cancel（Unix；Windows 未就绪）
+  webclaw-lite serve [--socket <path>]   # daemon：ping/status/prewarm/run/cancel/human-reply/collect/quit（Unix socket；Windows=127.0.0.1 TCP + endpoint 文件）
   webclaw-lite probe [--url URL] [--types 输入框,按钮,图标按钮,链接] [--search 关键词] [--limit 60]
   webclaw-lite recipe save --name <stem> (--stdin | --file <path>) [--title 标题]
   webclaw-lite recipe list
@@ -113,11 +113,14 @@ pub fn print_usage() {
   WEBCLAW_CDP_PORT      CDP 端口（默认 19222）
   WEBCLAW_HEADLESS      设为 1 时无头启动 Chrome（默认弹出可见窗口）
   WEBCLAW_CHROME_RECYCLE 设为 1 时强制杀再启浏览器（默认复用健康 CDP）
-  WEBCLAW_LITE_SOCKET   serve 默认 socket（否则 <WEBCLAW_HOME>/lite.sock）
+  WEBCLAW_LITE_SOCKET   serve endpoint（Unix=socket 路径；Windows=endpoint JSON 文件，默认 <WEBCLAW_HOME>/lite.sock）
+  WEBCLAW_LITE_USE_SERVE Host 设为 1 时优先走常驻 serve（缺省仍 CLI；不可达则回退 CLI，不重复执行）
+  serve run 可选 early_hitl=true：遇人审先返回 NEED_HUMAN（busy 保持），再用 human-reply/collect 收尾；默认仍阻塞到 done
   WEBCLAW_VISION_ASSERT 设为 1 时启用「断言画面含 …」OCR 断言
-  WEBCLAW_VISION_OCR_TIMEOUT_MS 画面断言 OCR 超时毫秒（默认 5000）
+  WEBCLAW_VISION_OCR_TIMEOUT_MS 画面断言 OCR 超时毫秒（默认 20000；与验证码 OCR Windows 实测对齐）
   WEBCLAW_CAPTCHA_OCR   设为 0 时关闭验证码 RapidOCR 试填（默认开，失败回落 HITL）
   WEBCLAW_CAPTCHA_OCR_MIN_CONF 验证码 OCR 最低置信度（默认 0.60）
+  WEBCLAW_CAPTCHA_OCR_TIMEOUT_MS 验证码 OCR 超时毫秒（默认 20000；Windows DirectML 实测单次约 3–16s（视负载））
   WEBCLAW_CAPTCHA_OCR_SUBMIT 设为 1 时 OCR 后自动点登录（默认只填不交）
   WEBCLAW_HUMAN_DIR     人机交换目录（默认 <run>/human）
   WEBCLAW_WORKER_URL    update 下载地址（完整 URL）
@@ -391,12 +394,391 @@ fn lite_prewarm() -> Result<(), String> {
     Ok(())
 }
 
+/// Shared serve-session state (Unix socket + Windows TCP).
+struct ServeShared {
+    run_busy: std::sync::Mutex<bool>,
+    final_result: std::sync::Mutex<Option<serde_json::Value>>,
+    hitl_notified: std::sync::atomic::AtomicBool,
+}
+
+impl ServeShared {
+    fn new() -> Self {
+        Self {
+            run_busy: std::sync::Mutex::new(false),
+            final_result: std::sync::Mutex::new(None),
+            hitl_notified: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+fn serve_req_truthy(req: &serde_json::Value, key: &str) -> bool {
+    match req.get(key) {
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(serde_json::Value::Number(n)) => n.as_i64() == Some(1) || n.as_u64() == Some(1),
+        Some(serde_json::Value::String(s)) => {
+            let t = s.trim();
+            t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
+        }
+        _ => false,
+    }
+}
+
+fn serve_parse_run_body(
+    req: &serde_json::Value,
+) -> Result<(String, String, std::collections::HashMap<String, String>), String> {
+    let recipe = req
+        .get("recipe")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let recipe_path = req
+        .get("recipe_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let title = req
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("serve-run")
+        .to_string();
+    let params = match req.get("params") {
+        None | Some(serde_json::Value::Null) => std::collections::HashMap::new(),
+        Some(serde_json::Value::String(s)) => match serde_json::from_str::<serde_json::Value>(s) {
+            Ok(serde_json::Value::Object(map)) => map
+                .into_iter()
+                .map(|(k, v)| {
+                    (
+                        k,
+                        match v {
+                            serde_json::Value::String(s) => s,
+                            other => other.to_string(),
+                        },
+                    )
+                })
+                .collect(),
+            _ => std::collections::HashMap::new(),
+        },
+        Some(serde_json::Value::Object(map)) => map
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    },
+                )
+            })
+            .collect(),
+        Some(_) => std::collections::HashMap::new(),
+    };
+    let body = if !recipe.trim().is_empty() {
+        recipe
+    } else if !recipe_path.trim().is_empty() {
+        std::fs::read_to_string(recipe_path.trim()).map_err(|e| e.to_string())?
+    } else {
+        return Err("provide recipe or recipe_path".into());
+    };
+    Ok((body, title, params))
+}
+
+fn serve_find_waiting_human(not_before: std::time::SystemTime) -> Option<serde_json::Value> {
+    let home = std::env::var("WEBCLAW_HOME").ok()?;
+    let runs = PathBuf::from(home).join("runs");
+    let rd = std::fs::read_dir(&runs).ok()?;
+    let mut best: Option<(std::time::SystemTime, PathBuf, serde_json::Value)> = None;
+    for ent in rd.flatten() {
+        let run_dir = ent.path();
+        if !run_dir.is_dir() {
+            continue;
+        }
+        let waiting = run_dir.join("human").join("waiting_human.json");
+        if !waiting.is_file() {
+            continue;
+        }
+        let human = run_dir.join("human");
+        if human.join("human_reply.txt").is_file() || human.join("human_reply.json").is_file() {
+            continue;
+        }
+        let modified = waiting.metadata().ok()?.modified().ok()?;
+        // Ignore stale HITL files from prior runs (would false-trigger early_hitl).
+        if modified < not_before {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&waiting).ok()?;
+        let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+        if best.as_ref().map(|(t, _, _)| modified > *t).unwrap_or(true) {
+            best = Some((modified, run_dir, v));
+        }
+    }
+    let (_, run_dir, v) = best?;
+    let human = run_dir.join("human");
+    let prompt_id = v
+        .get("promptId")
+        .or_else(|| v.get("prompt_id"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let kind = v
+        .get("kind")
+        .and_then(|x| x.as_str())
+        .unwrap_or("human")
+        .to_string();
+    let hint = v
+        .get("hint")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let image_path = v
+        .get("imagePath")
+        .or_else(|| v.get("image_path"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    Some(json!({
+        "type": "need_human",
+        "kind": kind,
+        "prompt_id": prompt_id,
+        "hint": hint,
+        "image_path": image_path,
+        "reply_file": human.join("human_reply.txt").display().to_string(),
+        "run_dir": run_dir.display().to_string(),
+    }))
+}
+
+fn serve_tag_op(mut v: serde_json::Value, op: &str) -> serde_json::Value {
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("op".into(), json!(op));
+    }
+    v
+}
+
+fn serve_op_run(req: &serde_json::Value, shared: &std::sync::Arc<ServeShared>) -> serde_json::Value {
+    {
+        let mut guard = match shared.run_busy.lock() {
+            Ok(g) => g,
+            Err(e) => return json!({"ok": false, "op": "run", "error": e.to_string()}),
+        };
+        if *guard {
+            return json!({
+                "ok": false,
+                "op": "run",
+                "error_code": "RUN_BUSY",
+                "error": "serve already has an active run",
+            });
+        }
+        *guard = true;
+    }
+    if let Ok(mut slot) = shared.final_result.lock() {
+        *slot = None;
+    }
+    shared
+        .hitl_notified
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+
+    let parsed = match serve_parse_run_body(req) {
+        Ok(v) => v,
+        Err(e) => {
+            if let Ok(mut g) = shared.run_busy.lock() {
+                *g = false;
+            }
+            return json!({"ok": false, "op": "run", "error": e, "error_code": "INVALID_ARGS"});
+        }
+    };
+    let (text, title, params) = parsed;
+    let early_hitl = serve_req_truthy(req, "early_hitl");
+
+    if !early_hitl {
+        let result = crate::worker::run_recipe_text_blocking(text, title, params);
+        if let Ok(mut g) = shared.run_busy.lock() {
+            *g = false;
+        }
+        return match result {
+            Ok(v) => serve_tag_op(v, "run"),
+            Err(e) => json!({"ok": false, "op": "run", "error": e}),
+        };
+    }
+
+    let shared_bg = shared.clone();
+    let hitl_not_before = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(1))
+        .unwrap_or_else(std::time::SystemTime::now);
+    std::thread::spawn(move || {
+        let result = crate::worker::run_recipe_text_blocking(text, title, params);
+        let val = match result {
+            Ok(v) => serve_tag_op(v, "run"),
+            Err(e) => json!({"ok": false, "op": "run", "error": e}),
+        };
+        if let Ok(mut slot) = shared_bg.final_result.lock() {
+            *slot = Some(val);
+        }
+        if let Ok(mut g) = shared_bg.run_busy.lock() {
+            *g = false;
+        }
+    });
+
+    let timeout = std::env::var("WEBCLAW_RUN_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|v| *v >= 1000)
+        .unwrap_or(600_000);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout);
+    loop {
+        let finished = shared
+            .run_busy
+            .lock()
+            .map(|g| !*g)
+            .unwrap_or(false);
+        if finished {
+            if let Ok(mut slot) = shared.final_result.lock() {
+                if let Some(v) = slot.take() {
+                    return v;
+                }
+            }
+            return json!({
+                "ok": false,
+                "op": "run",
+                "error": "serve run finished without result",
+                "error_code": "RUN_FAILED",
+            });
+        }
+        if !shared
+            .hitl_notified
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            if let Some(nh) = serve_find_waiting_human(hitl_not_before) {
+                shared
+                    .hitl_notified
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                return json!({
+                    "ok": false,
+                    "op": "run",
+                    "pending": true,
+                    "error_code": "NEED_HUMAN",
+                    "need_human": nh,
+                    "done": serde_json::Value::Null,
+                    "events_tail": [nh],
+                });
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = request_cancel();
+            return json!({
+                "ok": false,
+                "op": "run",
+                "pending": true,
+                "error": "serve run timed out waiting for human or completion",
+                "error_code": "TIMEOUT",
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+fn serve_op_collect(shared: &std::sync::Arc<ServeShared>, timeout_ms: u64) -> serde_json::Value {
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms.max(1000));
+    loop {
+        let busy = shared.run_busy.lock().map(|g| *g).unwrap_or(false);
+        if !busy {
+            if let Ok(mut slot) = shared.final_result.lock() {
+                if let Some(v) = slot.take() {
+                    return v;
+                }
+            }
+            return json!({
+                "ok": false,
+                "op": "collect",
+                "error": "no pending serve run result",
+                "error_code": "NO_ACTIVE_RUN",
+            });
+        }
+        if std::time::Instant::now() >= deadline {
+            return json!({
+                "ok": false,
+                "op": "collect",
+                "error": "collect timed out",
+                "error_code": "TIMEOUT",
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+fn serve_op_human_reply(
+    req: &serde_json::Value,
+    shared: &std::sync::Arc<ServeShared>,
+) -> serde_json::Value {
+    let run_dir = req
+        .get("run_dir")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from);
+    let mode = req
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let text = req.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    let human = match resolve_human_dir(run_dir.as_deref()) {
+        Ok(h) => h,
+        Err(e) => {
+            return json!({"ok": false, "op": "human-reply", "error": e, "error_code": "INVALID_ARGS"})
+        }
+    };
+    if let Err(e) = std::fs::create_dir_all(&human) {
+        return json!({"ok": false, "op": "human-reply", "error": e.to_string()});
+    }
+    let write_res = if mode == "cancel" || serve_req_truthy(req, "cancel") {
+        let _ = request_cancel();
+        std::fs::write(human.join("human_reply.json"), r#"{"cancel":true}"#)
+    } else if mode == "ok" || serve_req_truthy(req, "ok") {
+        std::fs::write(human.join("human_reply.json"), r#"{"ok":true}"#)
+    } else if !text.trim().is_empty() || mode == "text" {
+        if text.trim().is_empty() {
+            return json!({
+                "ok": false,
+                "op": "human-reply",
+                "error": "text required",
+                "error_code": "INVALID_ARGS",
+            });
+        }
+        std::fs::write(human.join("human_reply.txt"), format!("{}\n", text.trim()))
+    } else {
+        return json!({
+            "ok": false,
+            "op": "human-reply",
+            "error": "mode must be text|ok|cancel",
+            "error_code": "INVALID_ARGS",
+        });
+    };
+    if let Err(e) = write_res {
+        return json!({"ok": false, "op": "human-reply", "error": e.to_string()});
+    }
+    let timeout = req
+        .get("timeout_ms")
+        .and_then(|v| v.as_u64())
+        .or_else(|| {
+            std::env::var("WEBCLAW_RUN_TIMEOUT_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+        })
+        .unwrap_or(600_000);
+    let mut out = serve_op_collect(shared, timeout);
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert(
+            "human_reply".into(),
+            json!({"ok": true, "dir": human.display().to_string()}),
+        );
+    }
+    out
+}
+
 #[cfg(unix)]
 fn lite_serve(socket_path: &std::path::Path) -> Result<(), String> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     ensure_lite_env();
     if socket_path.exists() {
         let _ = std::fs::remove_file(socket_path);
@@ -411,12 +793,12 @@ fn lite_serve(socket_path: &std::path::Path) -> Result<(), String> {
         json!({
             "type":"serve_started",
             "socket": socket_path.display().to_string(),
-            "ops": ["ping","status","prewarm","run","cancel","quit"],
+            "ops": ["ping","status","prewarm","run","cancel","human-reply","collect","quit"],
             "phase": 2,
         })
     );
 
-    let run_busy = Arc::new(Mutex::new(false));
+    let shared = Arc::new(ServeShared::new());
     let shutting_down = Arc::new(AtomicBool::new(false));
 
     for conn in listener.incoming() {
@@ -430,11 +812,11 @@ fn lite_serve(socket_path: &std::path::Path) -> Result<(), String> {
                 continue;
             }
         };
-        let run_busy = run_busy.clone();
+        let shared = shared.clone();
         let shutting_down = shutting_down.clone();
         let sock_path = socket_path.to_path_buf();
         std::thread::spawn(move || {
-            if let Err(e) = handle_serve_conn(stream, run_busy, shutting_down) {
+            if let Err(e) = handle_serve_conn(stream, shared, shutting_down) {
                 eprintln!("serve conn: {e}");
             }
             let _ = sock_path;
@@ -447,7 +829,7 @@ fn lite_serve(socket_path: &std::path::Path) -> Result<(), String> {
 #[cfg(unix)]
 fn handle_serve_conn(
     mut stream: std::os::unix::net::UnixStream,
-    run_busy: std::sync::Arc<std::sync::Mutex<bool>>,
+    shared: std::sync::Arc<ServeShared>,
     shutting_down: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), String> {
     use std::io::{BufRead, BufReader, Write};
@@ -488,98 +870,15 @@ fn handle_serve_conn(
             }),
             Err(e) => json!({"ok": false, "op": "cancel", "error": e}),
         },
-        "run" => {
-            {
-                let mut guard = run_busy.lock().map_err(|e| e.to_string())?;
-                if *guard {
-                    return write_serve_resp(
-                        &mut stream,
-                        json!({
-                            "ok": false,
-                            "op": "run",
-                            "error_code": "RUN_BUSY",
-                            "error": "serve already has an active run",
-                        }),
-                    );
-                }
-                *guard = true;
-            }
-
-            let recipe = req
-                .get("recipe")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let recipe_path = req
-                .get("recipe_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let title = req
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or("serve-run")
-                .to_string();
-            let params = match req.get("params") {
-                None | Some(serde_json::Value::Null) => std::collections::HashMap::new(),
-                Some(serde_json::Value::String(s)) => match serde_json::from_str::<serde_json::Value>(s) {
-                    Ok(serde_json::Value::Object(map)) => map
-                        .into_iter()
-                        .map(|(k, v)| {
-                            (
-                                k,
-                                match v {
-                                    serde_json::Value::String(s) => s,
-                                    other => other.to_string(),
-                                },
-                            )
-                        })
-                        .collect(),
-                    _ => std::collections::HashMap::new(),
-                },
-                Some(serde_json::Value::Object(map)) => map
-                    .iter()
-                    .map(|(k, v)| {
-                        (
-                            k.clone(),
-                            match v {
-                                serde_json::Value::String(s) => s.clone(),
-                                other => other.to_string(),
-                            },
-                        )
-                    })
-                    .collect(),
-                Some(_) => std::collections::HashMap::new(),
-            };
-
-            let body = if !recipe.trim().is_empty() {
-                Ok(recipe)
-            } else if !recipe_path.trim().is_empty() {
-                std::fs::read_to_string(recipe_path.trim()).map_err(|e| e.to_string())
-            } else {
-                Err("provide recipe or recipe_path".into())
-            };
-
-            let result = match body {
-                Ok(text) => crate::worker::run_recipe_text_blocking(text, title, params),
-                Err(e) => Ok(json!({"ok": false, "error": e, "error_code": "INVALID_ARGS"})),
-            };
-
-            if let Ok(mut g) = run_busy.lock() {
-                *g = false;
-            }
-
-            match result {
-                Ok(v) => {
-                    let mut out = v;
-                    if let Some(obj) = out.as_object_mut() {
-                        obj.insert("op".into(), json!("run"));
-                    }
-                    out
-                }
-                Err(e) => json!({"ok": false, "op": "run", "error": e}),
-            }
+        "run" => serve_op_run(&req, &shared),
+        "collect" => {
+            let timeout = req
+                .get("timeout_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(600_000);
+            serve_op_collect(&shared, timeout)
         }
+        "human-reply" => serve_op_human_reply(&req, &shared),
         "quit" | "exit" => {
             shutting_down.store(true, Ordering::SeqCst);
             let _ = request_cancel();
@@ -590,7 +889,7 @@ fn handle_serve_conn(
         other => json!({
             "ok": false,
             "error": format!(
-                "unsupported op '{other}' (phase-2 serve: ping|status|prewarm|run|cancel|quit)"
+                "unsupported op '{other}' (phase-2 serve: ping|status|prewarm|run|cancel|human-reply|collect|quit)"
             ),
         }),
     };
@@ -607,7 +906,6 @@ fn write_serve_resp(
     Ok(())
 }
 
-#[cfg(unix)]
 fn serve_status_value() -> serde_json::Value {
     let home = std::env::var("WEBCLAW_HOME").unwrap_or_default();
     let chrome = std::env::var("WEBCLAW_CHROME").unwrap_or_default();
@@ -641,6 +939,148 @@ fn serve_status_value() -> serde_json::Value {
             "statusSource": "lite_serve",
         }
     })
+}
+
+
+#[cfg(windows)]
+fn lite_serve(endpoint_path: &std::path::Path) -> Result<(), String> {
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    ensure_lite_env();
+    if let Some(parent) = endpoint_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    // Bind ephemeral loopback port; publish endpoint JSON at the same path Unix uses for the socket.
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    let addr = listener.local_addr().map_err(|e| e.to_string())?;
+    let endpoint = json!({
+        "transport": "tcp",
+        "host": "127.0.0.1",
+        "port": addr.port(),
+        "product": "webclaw-lite",
+    });
+    std::fs::write(
+        endpoint_path,
+        format!("{endpoint}\n"),
+    )
+    .map_err(|e| e.to_string())?;
+    eprintln!(
+        "webclaw-lite serve listening on {} (endpoint file {})",
+        addr,
+        endpoint_path.display()
+    );
+    println!(
+        "{}",
+        json!({
+            "type":"serve_started",
+            "socket": endpoint_path.display().to_string(),
+            "transport": "tcp",
+            "addr": addr.to_string(),
+            "ops": ["ping","status","prewarm","run","cancel","human-reply","collect","quit"],
+            "phase": 2,
+        })
+    );
+
+    let shared = Arc::new(ServeShared::new());
+    let shutting_down = Arc::new(AtomicBool::new(false));
+
+    for conn in listener.incoming() {
+        if shutting_down.load(Ordering::SeqCst) {
+            break;
+        }
+        let stream = match conn {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("serve accept: {e}");
+                continue;
+            }
+        };
+        let shared = shared.clone();
+        let shutting_down = shutting_down.clone();
+        let ep = endpoint_path.to_path_buf();
+        std::thread::spawn(move || {
+            if let Err(e) = handle_serve_conn_tcp(stream, shared, shutting_down) {
+                eprintln!("serve conn: {e}");
+            }
+            let _ = ep;
+        });
+    }
+    let _ = std::fs::remove_file(endpoint_path);
+    Ok(())
+}
+
+#[cfg(windows)]
+fn handle_serve_conn_tcp(
+    mut stream: std::net::TcpStream,
+    shared: std::sync::Arc<ServeShared>,
+    shutting_down: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<(), String> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::sync::atomic::Ordering;
+    let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
+    let mut line = String::new();
+    if reader.read_line(&mut line).is_err() {
+        return Ok(());
+    }
+    let line = line.trim();
+    if line.is_empty() {
+        return Ok(());
+    }
+    let req: serde_json::Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(
+                stream,
+                "{}",
+                json!({"ok":false,"error": format!("bad json: {e}")})
+            );
+            return Ok(());
+        }
+    };
+    let op = req.get("op").and_then(|v| v.as_str()).unwrap_or("");
+    let resp = match op {
+        "ping" => json!({"ok": true, "op": "ping", "product": "webclaw-lite", "version": product_version()}),
+        "status" => serve_status_value(),
+        "prewarm" => match lite_prewarm_value() {
+            Ok(v) => json!({"ok": true, "op": "prewarm", "result": v}),
+            Err(e) => json!({"ok": false, "op": "prewarm", "error": e}),
+        },
+        "cancel" => match request_cancel() {
+            Ok(flag) => json!({
+                "ok": true,
+                "op": "cancel",
+                "path": flag.display().to_string(),
+            }),
+            Err(e) => json!({"ok": false, "op": "cancel", "error": e}),
+        },
+        "run" => serve_op_run(&req, &shared),
+        "collect" => {
+            let timeout = req
+                .get("timeout_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(600_000);
+            serve_op_collect(&shared, timeout)
+        }
+        "human-reply" => serve_op_human_reply(&req, &shared),
+        "quit" | "exit" => {
+            shutting_down.store(true, Ordering::SeqCst);
+            let _ = request_cancel();
+            let _ = writeln!(stream, "{}", json!({"ok": true, "op": "quit"}));
+            if let Ok(p) = std::env::var("WEBCLAW_LITE_SOCKET") {
+                let _ = std::fs::remove_file(p);
+            }
+            std::process::exit(0);
+        }
+        other => json!({
+            "ok": false,
+            "error": format!(
+                "unsupported op '{other}' (phase-2 serve: ping|status|prewarm|run|cancel|human-reply|collect|quit)"
+            ),
+        }),
+    };
+    let _ = writeln!(stream, "{resp}");
+    Ok(())
 }
 
 fn lite_prewarm_value() -> Result<serde_json::Value, String> {
@@ -857,9 +1297,51 @@ pub fn run_cli() {
                     }
                 }
             }
-            #[cfg(not(unix))]
+            #[cfg(windows)]
             {
-                eprintln!("serve 仅支持 Unix socket（Windows 待补）");
+                let mut sock = std::env::var("WEBCLAW_LITE_SOCKET")
+                    .ok()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| {
+                        let home = std::env::var("WEBCLAW_HOME").unwrap_or_else(|_| {
+                            std::env::var("LOCALAPPDATA")
+                                .map(|h| format!("{h}\\webclaw"))
+                                .or_else(|_| std::env::var("USERPROFILE").map(|h| format!("{h}\\.webclaw")))
+                                .unwrap_or_else(|_| ".webclaw".into())
+                        });
+                        std::path::PathBuf::from(home).join("lite.sock")
+                    });
+                let mut i = 2;
+                while i < args.len() {
+                    match args[i].as_str() {
+                        "--socket" => {
+                            i += 1;
+                            if let Some(p) = args.get(i) {
+                                sock = std::path::PathBuf::from(p);
+                            }
+                        }
+                        "-h" | "--help" => {
+                            print_usage();
+                            std::process::exit(0);
+                        }
+                        other => {
+                            eprintln!("未知参数: {other}");
+                            std::process::exit(2);
+                        }
+                    }
+                    i += 1;
+                }
+                match lite_serve(&sock) {
+                    Ok(()) => std::process::exit(0),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            #[cfg(not(any(unix, windows)))]
+            {
+                eprintln!("serve 在此平台未实现");
                 std::process::exit(2);
             }
         }

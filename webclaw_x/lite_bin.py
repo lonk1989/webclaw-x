@@ -26,6 +26,7 @@ def candidates(repo_root: Path | None = None) -> list[Path]:
     out.extend(
         [
             root / "target" / "release" / "webclaw-lite",
+            root / "target" / "release" / "webclaw-lite.exe",
             root / "bin-webclaw-lite",
             Path.home() / ".webclaw" / "bin" / "webclaw-lite",
             _LEGACY_OSS,

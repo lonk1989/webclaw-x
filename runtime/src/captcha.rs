@@ -33,7 +33,28 @@ pub struct LoginFormSnapshot {
 
 impl LoginFormSnapshot {
     pub fn absorb_input_step(&mut self, args: &str) {
-        let (text, field) = crate::commands::scripts::parse_input_step_args(args);
+        let (mut text, mut field) = crate::commands::scripts::parse_input_step_args(args);
+        // Bare NL style used in fixtures: 「账号demo」「密码demo」without '='.
+        if field.is_empty() {
+            const PAIRS: &[(&str, &str)] = &[
+                ("密码", "password"),
+                ("账号", "account"),
+                ("帐户", "account"),
+                ("用户名", "account"),
+                ("用户", "account"),
+                ("手机", "account"),
+            ];
+            for (zh, kind) in PAIRS {
+                if let Some(rest) = text.strip_prefix(zh) {
+                    if !rest.is_empty() {
+                        field = (*zh).to_string();
+                        text = rest.to_string();
+                        let _ = kind;
+                        break;
+                    }
+                }
+            }
+        }
         if text.is_empty() {
             return;
         }
@@ -42,7 +63,7 @@ impl LoginFormSnapshot {
         } else if field.contains("手机")
             || field.contains("账号")
             || field.contains("帐户")
-            || field.contains("用户名")
+            || field.contains("用户")
             || field.contains("user")
         {
             self.phone = Some(text);
@@ -765,7 +786,17 @@ async fn click_login_button(client: &mut CdpClient) -> Result<(), String> {
   };
   const preferred = document.querySelector('button.ant-btn-primary[type="submit"], form button[type="submit"], button.ant-btn-primary');
   if (preferred && isVisible(preferred)) {
-    try { preferred.click(); return { ok: true }; } catch (_) {}
+    try {
+      const form = preferred.closest('form');
+      if (form && typeof form.requestSubmit === 'function') {
+        form.requestSubmit(preferred);
+        return { ok: true, via: 'requestSubmit' };
+      }
+      preferred.click();
+      return { ok: true, via: 'click' };
+    } catch (_) {
+      try { preferred.click(); return { ok: true, via: 'click-fallback' }; } catch (_) {}
+    }
   }
   const nodes = document.querySelectorAll('button, input[type=submit], a, [role=button], [ng-click]');
   for (const el of nodes) {
@@ -976,7 +1007,18 @@ impl CaptchaOcrOutcome {
     }
 }
 
-/// RapidOCR 短超时试识别；带置信度门槛与稳定错误码（失败回落 HITL，不烧站点重试）。
+/// Captcha OCR wall budget. Default 20000ms — Windows RapidOCR/DirectML measured
+/// ~3.4s per call (cold and hot) with correct reads; 1800ms falsely yielded OCR_TIMEOUT.
+/// Override with WEBCLAW_CAPTCHA_OCR_TIMEOUT_MS. Not a substitute for broken models.
+fn captcha_ocr_timeout_ms() -> u64 {
+    std::env::var("WEBCLAW_CAPTCHA_OCR_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|v| (500..=120_000).contains(v))
+        .unwrap_or(20_000)
+}
+
+/// RapidOCR timed try-recognize; confidence gate + stable error codes (fallback HITL).
 async fn try_ocr_captcha_outcome(png: &[u8]) -> CaptchaOcrOutcome {
     if !captcha_ocr_enabled() {
         return CaptchaOcrOutcome::Disabled;
@@ -984,23 +1026,48 @@ async fn try_ocr_captcha_outcome(png: &[u8]) -> CaptchaOcrOutcome {
     if !crate::rhai_runtime::local_ocr::ocr_models_ready() {
         return CaptchaOcrOutcome::Unavailable;
     }
-    let png = png.to_vec();
     let min_conf = captcha_ocr_min_confidence();
+    let budget_ms = captcha_ocr_timeout_ms();
+
+    fn score_outcome(
+        scored: crate::rhai_runtime::local_ocr::OcrBytesResult,
+        min_conf: f32,
+    ) -> CaptchaOcrOutcome {
+        let raw = scored.text.clone();
+        let score = scored.mean_score;
+        match sanitize_captcha_ocr_text(&raw) {
+            Some(code) if score + f32::EPSILON >= min_conf => CaptchaOcrOutcome::Ok { code, score },
+            Some(_) => CaptchaOcrOutcome::LowConfidence { score, raw },
+            None => CaptchaOcrOutcome::BadRead { raw },
+        }
+    }
+
+    // Unbounded first attempt warms ORT/DirectML and may already succeed. A timed
+    // retry covers contention spikes without treating healthy-but-slow OCR as failure.
+    let warm_png = png.to_vec();
+    let warm = tokio::task::spawn_blocking(move || {
+        crate::rhai_runtime::local_ocr::ocr_image_bytes_scored(&warm_png)
+    })
+    .await;
+    match warm {
+        Ok(Ok(scored)) => {
+            let out = score_outcome(scored, min_conf);
+            if matches!(out, CaptchaOcrOutcome::Ok { .. }) {
+                return out;
+            }
+            // Low/bad read: do not burn a second attempt on same bytes.
+            return out;
+        }
+        Ok(Err(_)) => {}
+        Err(_) => {}
+    }
+
+    let png = png.to_vec();
     let fut = tokio::task::spawn_blocking(move || {
         crate::rhai_runtime::local_ocr::ocr_image_bytes_scored(&png)
     });
-    match tokio::time::timeout(Duration::from_millis(1800), fut).await {
-        Ok(Ok(Ok(scored))) => {
-            let raw = scored.text.clone();
-            let score = scored.mean_score;
-            match sanitize_captcha_ocr_text(&raw) {
-                Some(code) if score + f32::EPSILON >= min_conf => {
-                    CaptchaOcrOutcome::Ok { code, score }
-                }
-                Some(_) => CaptchaOcrOutcome::LowConfidence { score, raw },
-                None => CaptchaOcrOutcome::BadRead { raw },
-            }
-        }
+    match tokio::time::timeout(Duration::from_millis(budget_ms), fut).await {
+        Ok(Ok(Ok(scored))) => score_outcome(scored, min_conf),
         Ok(Ok(Err(_))) => CaptchaOcrOutcome::Unavailable,
         Ok(Err(_)) => CaptchaOcrOutcome::Unavailable,
         Err(_) => CaptchaOcrOutcome::Timeout,
@@ -1050,7 +1117,7 @@ pub async fn resolve_if_present<R: Runtime>(
                     CaptchaOcrOutcome::Unavailable => {
                         "OCR_UNAVAILABLE（模型未就绪或识别失败）".to_string()
                     }
-                    CaptchaOcrOutcome::Timeout => "OCR_TIMEOUT".to_string(),
+                    CaptchaOcrOutcome::Timeout => format!("OCR_TIMEOUT (budget={}ms)", captcha_ocr_timeout_ms()),
                     CaptchaOcrOutcome::LowConfidence { score, raw } => format!(
                         "OCR_LOW_CONFIDENCE conf={score:.2} raw={raw:?}（门槛 {:.2}）",
                         captcha_ocr_min_confidence()
@@ -1124,6 +1191,39 @@ pub async fn resolve_if_present<R: Runtime>(
                 let _ = client.wait_after_navigation_cancel(15, Some(cancel)).await;
             }
             wait_slider_if_present(app, waiters, task_id, client, cancel, &push_log).await?;
+        }
+
+        // Diagnose stuck-on-login after fill+click (fixture/HITL).
+        if let Ok(v) = client
+            .evaluate_resilient(
+                r#"(() => {
+  const captcha = document.querySelector('#captcha, input[name=captcha], input[placeholder*=\"验证码\"]');
+  const user = document.querySelector('#user, input[name=user], input[placeholder*=\"账号\"]');
+  const pwd = document.querySelector('#pwd, input[type=password]');
+  const err = document.getElementById('err');
+  return {
+    url: location.href,
+    title: document.title || '',
+    captchaLen: captcha ? String(captcha.value||'').length : -1,
+    captchaVal: captcha ? String(captcha.value||'') : null,
+    userLen: user ? String(user.value||'').length : -1,
+    pwdLen: pwd ? String(pwd.value||'').length : -1,
+    errShown: !!(err && getComputedStyle(err).display !== 'none'),
+    errText: err ? String(err.textContent||'').trim() : ''
+  };
+})()"#,
+            )
+            .await
+        {
+            push_log(format!(
+                "验证码提交后页面：url={} captchaLen={} userLen={} pwdLen={} errShown={} errText={:?}",
+                v.get("url").and_then(|x| x.as_str()).unwrap_or("?"),
+                v.get("captchaLen").and_then(|x| x.as_i64()).unwrap_or(-1),
+                v.get("userLen").and_then(|x| x.as_i64()).unwrap_or(-1),
+                v.get("pwdLen").and_then(|x| x.as_i64()).unwrap_or(-1),
+                v.get("errShown").and_then(|x| x.as_bool()).unwrap_or(false),
+                v.get("errText").and_then(|x| x.as_str()).unwrap_or("")
+            ));
         }
 
         tokio::time::sleep(Duration::from_millis(800)).await;
@@ -1492,9 +1592,23 @@ mod human_assist_args_tests {
 #[cfg(test)]
 mod captcha_ocr_tests {
     use super::{
-        captcha_ocr_enabled, captcha_ocr_min_confidence, captcha_ocr_submit_enabled,
+        LoginFormSnapshot, captcha_ocr_enabled, captcha_ocr_min_confidence, captcha_ocr_submit_enabled, captcha_ocr_timeout_ms,
         sanitize_captcha_ocr_text, CaptchaOcrOutcome,
     };
+
+    #[test]
+    fn absorb_bare_account_password_nl() {
+        let mut s = LoginFormSnapshot::default();
+        s.absorb_input_step("账号demo");
+        s.absorb_input_step("密码demo");
+        assert_eq!(s.phone.as_deref(), Some("demo"));
+        assert_eq!(s.password.as_deref(), Some("demo"));
+        let mut s2 = LoginFormSnapshot::default();
+        s2.absorb_input_step("账号=demo");
+        s2.absorb_input_step("密码=demo");
+        assert_eq!(s2.phone.as_deref(), Some("demo"));
+        assert_eq!(s2.password.as_deref(), Some("demo"));
+    }
 
     #[test]
     fn sanitize_captcha_ocr_text_keeps_alnum() {
@@ -1510,6 +1624,15 @@ mod captcha_ocr_tests {
         std::env::set_var("WEBCLAW_CAPTCHA_OCR", "0");
         assert!(!captcha_ocr_enabled());
         std::env::remove_var("WEBCLAW_CAPTCHA_OCR");
+    }
+
+    #[test]
+    fn captcha_ocr_timeout_defaults_at_least_measured_windows_budget() {
+        std::env::remove_var("WEBCLAW_CAPTCHA_OCR_TIMEOUT_MS");
+        assert!(captcha_ocr_timeout_ms() >= 8000);
+        std::env::set_var("WEBCLAW_CAPTCHA_OCR_TIMEOUT_MS", "2500");
+        assert_eq!(captcha_ocr_timeout_ms(), 2500);
+        std::env::remove_var("WEBCLAW_CAPTCHA_OCR_TIMEOUT_MS");
     }
 
     #[test]

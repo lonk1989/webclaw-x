@@ -147,7 +147,7 @@ fn read_reply(dir: &Path) -> Result<Option<HumanReply>, String> {
     let txt_path = dir.join("human_reply.txt");
     if txt_path.is_file() {
         let raw = std::fs::read_to_string(&txt_path).map_err(|e| e.to_string())?;
-        let t = raw.trim();
+        let t = raw.trim().trim_start_matches('\u{feff}').trim();
         if t.is_empty() || t.eq_ignore_ascii_case("ok") || t == "完成" || t == "已完成" {
             return Ok(Some(HumanReply::Confirmed));
         }

@@ -391,7 +391,8 @@ fn vision_assert_ocr_timeout_ms() -> u64 {
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .filter(|v| *v >= 200)
-        .unwrap_or(5_000)
+        // Align with captcha OCR Windows DirectML latency (often multi-second).
+        .unwrap_or(20_000)
 }
 
 /// 解析「画面含 <needle> [区域x,y,w,h|@x,y,w,h]」

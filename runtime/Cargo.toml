@@ -92,3 +92,8 @@ desktop = [
   "custom-protocol",
 ]
 custom-protocol = ["tauri/custom-protocol"]
+
+[[bin]]
+name = "ocr_bench"
+path = "src/bin/ocr_bench.rs"
+

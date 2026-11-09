@@ -933,13 +933,20 @@ pub fn run_recipe_text_blocking(
     let sink = Arc::new(CollectingSink {
         events: parking_lot::Mutex::new(Vec::new()),
     });
-    run_sink::install_worker_sink(sink.clone());
+    // Do not let run_recipe_async_inner(install_jsonl_sink=true) replace the collector.
+    run_sink::install_worker_sink(Arc::new(FanoutRunSink {
+        sinks: vec![
+            Arc::new(JsonlRunSink) as Arc<dyn run_sink::RunSink>,
+            sink.clone() as Arc<dyn run_sink::RunSink>,
+        ],
+    }));
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
-    let run_result = rt.block_on(run_recipe_async(cli));
+    let task_id = format!("worker-{}", uuid::Uuid::new_v4());
+    let run_result = rt.block_on(run_recipe_async_inner(cli, false, task_id));
     let events = sink.events.lock().clone();
     let done = events
         .iter()

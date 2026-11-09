@@ -32,7 +32,8 @@ from webclaw_x.errors import ErrorCode, envelope  # noqa: E402
 from webclaw_x.scrub import scrub_obj, remember_sensitive
 from webclaw_x import jobs
 from webclaw_x.recipe_library import RecipeLibrary, LibraryError  # noqa: E402
-from webclaw_x.lite_bin import resolve_lite_bin  # noqa: E402
+from webclaw_x.lite_bin import resolve_lite_bin
+from webclaw_x.lite_daemon import call as lite_serve_call, use_serve_opt_in  # noqa: E402
 
 BINARY = str(resolve_lite_bin(_ROOT))
 
@@ -40,6 +41,9 @@ HOME = Path(os.environ.get("WEBCLAW_HOME", str(Path.home() / ".webclaw")))
 RUN_TIMEOUT = int(os.environ.get("WEBCLAW_RUN_TIMEOUT_MS", "600000")) / 1000
 PROBE_TIMEOUT = int(os.environ.get("WEBCLAW_PROBE_TIMEOUT_MS", "120000")) / 1000
 DUALWRITE = os.environ.get("WEBCLAW_DUALWRITE", "1") != "0"
+
+# Last serve early_hitl NEED_HUMAN (run_dir / prompt_id) for concurrent human_reply.
+_serve_hitl: dict | None = None
 
 from webclaw_x.fast_card import FAST_CARD  # noqa: E402
 from webclaw_x import status_fast  # noqa: E402
@@ -63,6 +67,36 @@ def _env() -> dict[str, str]:
     return env
 
 
+def _try_serve_simple(args: list[str], timeout: float) -> dict | None:
+    """Opt-in serve path for non-streaming ops. None => caller must use CLI."""
+    if not use_serve_opt_in() or not args:
+        return None
+    op = args[0]
+    mapping = {
+        "status": ("status", min(timeout, 30.0)),
+        "prewarm": ("prewarm", min(timeout, 120.0)),
+        "cancel": ("cancel", min(timeout, 15.0)),
+    }
+    if op not in mapping:
+        return None
+    serve_op, to = mapping[op]
+    resp = lite_serve_call(serve_op, timeout=to)
+    if not resp or not resp.get("ok"):
+        return None
+    payload = resp.get("status") if op == "status" else resp
+    return envelope(
+        ok=True,
+        code=ErrorCode.OK,
+        message="",
+        data={
+            "stdout": json.dumps(payload, ensure_ascii=False),
+            "stderr": "",
+            "exit_code": 0,
+            "via": "lite_serve",
+        },
+    )
+
+
 def _run(args: list[str], timeout: float, stdin_text: str | None = None) -> dict:
     if not Path(BINARY).is_file():
         return envelope(
@@ -71,6 +105,10 @@ def _run(args: list[str], timeout: float, stdin_text: str | None = None) -> dict
             message=f"webclaw-lite binary missing: {BINARY}",
             data={"stdout": "", "stderr": "", "exit_code": None},
         )
+    if stdin_text is None:
+        served = _try_serve_simple(args, timeout)
+        if served is not None:
+            return served
     try:
         proc = subprocess.run(
             [BINARY, *args],
@@ -525,6 +563,82 @@ async def webclaw_run(
     def execute():
         if not Path(BINARY).is_file():
             return _finalize(_run(args, timeout=RUN_TIMEOUT, stdin_text=stdin_text))
+        # Opt-in persistent path via serve; default remains jobs+CLI streaming.
+        # Unreachable serve => None => single CLI fallback (never double-run).
+        if use_serve_opt_in() and stdin_text is not None:
+            global _serve_hitl
+            extra = {
+                "recipe": stdin_text,
+                "title": title.strip() or "host-run",
+                "early_hitl": True,
+            }
+            if params.strip():
+                extra["params"] = params.strip()
+            resp = lite_serve_call("run", timeout=float(RUN_TIMEOUT), **extra)
+            if resp is not None:
+                if resp.get("error_code") == "RUN_BUSY":
+                    return scrub_obj(
+                        envelope(
+                            ok=False,
+                            code=ErrorCode.RUN_BUSY,
+                            message=resp.get("error") or "serve already has an active run",
+                            data={"via": "lite_serve", "serve": resp},
+                        )
+                    )
+                ok = bool(resp.get("ok"))
+                done = resp.get("done") if isinstance(resp.get("done"), dict) else None
+                # Historical need_human after a terminal done must not look like active HITL.
+                pending = bool(resp.get("pending"))
+                need = resp.get("need_human") if (pending or not done) else None
+                if isinstance(need, dict) and pending:
+                    _serve_hitl = {
+                        "run_dir": need.get("run_dir") or "",
+                        "prompt_id": need.get("prompt_id") or "",
+                        "need_human": need,
+                    }
+                elif done:
+                    _serve_hitl = None
+                events = resp.get("events_tail") or []
+                lines = [json.dumps(e, ensure_ascii=False) for e in events if isinstance(e, dict)]
+                if need and isinstance(need, dict):
+                    lines.append(json.dumps(need, ensure_ascii=False))
+                if done and isinstance(done, dict):
+                    lines.append(json.dumps(done, ensure_ascii=False))
+                if need and pending:
+                    code = ErrorCode.NEED_HUMAN
+                    ok_out = False
+                    msg = "需要人工操作，请收到用户回复后调用 webclaw_human_reply"
+                elif ok and done and not need:
+                    code = ErrorCode.OK
+                    ok_out = True
+                    msg = ""
+                else:
+                    code = ErrorCode.RUN_FAILED
+                    ok_out = False
+                    msg = (done.get("error") if isinstance(done, dict) else None) or resp.get("error") or ""
+                    if resp.get("error_code") == "TIMEOUT":
+                        code = ErrorCode.TIMEOUT
+                raw = envelope(
+                    ok=ok_out,
+                    code=code,
+                    message=msg,
+                    data={
+                        "stdout": chr(10).join(lines),
+                        "stderr": "",
+                        "exit_code": 0 if ok_out else 1,
+                        "via": "lite_serve",
+                        "serve": resp,
+                    },
+                )
+                if need and pending:
+                    raw["waiting"] = need
+                    raw["run_dir"] = need.get("run_dir")
+                    raw["job_id"] = Path(str(need.get("run_dir") or "")).name or None
+                result = _finalize(raw, dualwrite=dualwrite_tables)
+                result["via"] = "lite_serve"
+                if resolved_version:
+                    result["recipe_version"] = resolved_version
+                return scrub_obj(result)
         r = jobs.start([BINARY, *args], _env(), stdin_text, RUN_TIMEOUT, dualwrite_tables)
         result = _finalize(r, dualwrite=dualwrite_tables)
         if resolved_version:
@@ -582,16 +696,62 @@ async def webclaw_human_reply(mode: str, text: str = "", run_id: str = "", promp
         return envelope(ok=False, code=ErrorCode.INVALID_ARGS,
                                   message="mode must be text|ok|cancel; text mode requires text")
     job = jobs.waiting(run_id, prompt_id, claim=True)
-    if job is None:
-        return envelope(ok=False, code=ErrorCode.NO_ACTIVE_HUMAN,
-                                  message="No matching active human prompt")
     if mode == "text":
         remember_sensitive(text)
-    args = ["human-reply", "--run-dir", job.run_dir]
-    args += ["--text", text] if mode == "text" else ["--" + mode]
 
     def resume():
+        global _serve_hitl
+        # Serve early_hitl path: resume via daemon human-reply (waits for collect).
+        if job is None and use_serve_opt_in():
+            hitl = _serve_hitl or {}
+            rd = (run_id.strip() if run_id.strip() else "") or hitl.get("run_dir") or ""
+            if not rd and hitl.get("need_human"):
+                rd = (hitl["need_human"] or {}).get("run_dir") or ""
+            # Accept bare run folder name as run_id from prior NEED_HUMAN.
+            if rd and not Path(rd).is_dir():
+                cand = HOME / "runs" / rd
+                if cand.is_dir():
+                    rd = str(cand)
+            if prompt_id.strip() and hitl.get("prompt_id") and prompt_id.strip() != hitl.get("prompt_id"):
+                return envelope(ok=False, code=ErrorCode.NO_ACTIVE_HUMAN,
+                                          message="No matching active human prompt")
+            if not rd or not (Path(rd) / "human" / "waiting_human.json").is_file():
+                # Fall through: maybe serve still waiting under newest run.
+                pass
+            extra = {"mode": mode, "run_dir": rd or None}
+            if mode == "text":
+                extra["text"] = text
+            resp = lite_serve_call("human-reply", timeout=float(RUN_TIMEOUT), **{k: v for k, v in extra.items() if v is not None})
+            if resp is not None:
+                _serve_hitl = None
+                ok = bool(resp.get("ok"))
+                done = resp.get("done") if isinstance(resp.get("done"), dict) else None
+                events = resp.get("events_tail") or []
+                lines = [json.dumps(e, ensure_ascii=False) for e in events if isinstance(e, dict)]
+                if done:
+                    lines.append(json.dumps(done, ensure_ascii=False))
+                done_ok = bool(done) and int(done.get("fail", 1)) == 0
+                raw = envelope(
+                    ok=ok and done_ok,
+                    code=ErrorCode.OK if (ok and done_ok) else ErrorCode.RUN_FAILED,
+                    message=("" if (ok and done_ok) else (resp.get("error") or (done or {}).get("error") or "")),
+                    data={
+                        "stdout": chr(10).join(lines),
+                        "stderr": "",
+                        "exit_code": 0 if (ok and done_ok) else 1,
+                        "via": "lite_serve",
+                        "serve": resp,
+                    },
+                )
+                result = _finalize(raw, dualwrite=DUALWRITE)
+                result["via"] = "lite_serve"
+                return scrub_obj(result)
+        if job is None:
+            return envelope(ok=False, code=ErrorCode.NO_ACTIVE_HUMAN,
+                                      message="No matching active human prompt")
         # CLI replies only to a validated live run, never last-need-human archive.
+        args = ["human-reply", "--run-dir", job.run_dir]
+        args += ["--text", text] if mode == "text" else ["--" + mode]
         ack = _run(args, timeout=30)
         if not ack.get("ok"):
             return _finalize(ack)
@@ -612,6 +772,12 @@ async def webclaw_cancel(run_id: str = "") -> dict:
     collateral cancel of a sibling bare CLI run sharing WEBCLAW_HOME).
     """
     def cancel():
+        global _serve_hitl
+        serve_cancel = None
+        if use_serve_opt_in():
+            serve_cancel = lite_serve_call("cancel", timeout=5.0)
+            if serve_cancel and serve_cancel.get("ok"):
+                _serve_hitl = None
         managed = jobs.cancel_active(run_id or None, home=HOME)
         if managed["code"] == ErrorCode.RUN_CANCELLED.value:
             result = _finalize(managed)
@@ -622,6 +788,22 @@ async def webclaw_cancel(run_id: str = "") -> dict:
                 "code": "OK" if not managed["data"].get("cancel_marker_error") else "RUN_FAILED",
                 "message": "Native cancel marker requested by managed cancellation; no duplicate CLI call",
             }
+        elif serve_cancel and serve_cancel.get("ok"):
+            # Serve-managed run (no jobs child): marker written; do not CLI-cancel again.
+            result = _finalize(
+                envelope(
+                    ok=True,
+                    code=ErrorCode.RUN_CANCELLED,
+                    message="Serve run cancel requested",
+                    data={
+                        "cancelled": True,
+                        "via": "lite_serve",
+                        "serve": serve_cancel,
+                        "native_cancel": {"ok": True, "code": "OK", "message": serve_cancel.get("path")},
+                    },
+                )
+            )
+            result["via"] = "lite_serve"
         else:
             # Unify empty-op codes: always NO_ACTIVE_RUN (never OK + side-effect CLI cancel).
             result = _finalize(managed)
