@@ -5,7 +5,8 @@
 菜谱 = **指令（动词）** + **目标/参数**；中英动词同一回放路径（如 `打开`/`open`、`等待`/`wait`、`采集`/`collect`）。
 
 > 仓库：<https://github.com/lonk1989/webclaw-x>  
-> 当前发布：[v0.2.1](https://github.com/lonk1989/webclaw-x/releases/tag/v0.2.1)（预编译：Windows x64；Linux 见 v0.2.0；macOS 请本机源码构建）
+> 当前发布：[v0.2.1](https://github.com/lonk1989/webclaw-x/releases/tag/v0.2.1)  
+> 打 `v*` 标签后 GitHub Actions（`.github/workflows/release.yml`）会构建并上传 **Windows x64 / macOS arm64 / Linux x64** 预编译；也可在 Actions 里对已有 tag 手动 Run workflow。
 
 ---
 
@@ -123,6 +124,18 @@ powershell -ExecutionPolicy Bypass -File .\skills\webclaw-lite\scripts\write_mcp
 export PATH="$HOME/.cargo/bin:$PATH"
 ./scripts/build_runtime.sh   # 编译并安装到 ~/.webclaw/bin/；会留下很大的 target/
 ```
+
+### 发版与多平台预编译（GitHub Actions）
+
+流程与旧仓 `webclaw-oss` 的 `release.yml` 同类：推送 **`v*`** 标签后，CI 在 `windows-latest` / `macos-latest`（arm64）/ `ubuntu-22.04` 上 `cargo build --release -p webclaw --bin webclaw-lite`，并把下列资产挂到该 tag 的 Release：
+
+| 资产名 | 平台 |
+|--------|------|
+| `webclaw-lite-windows-x64.exe` (+ `.sha256`) | Windows AMD64 |
+| `webclaw-lite-macos-arm64` (+ `.sha256`) | macOS Apple Silicon |
+| `webclaw-lite-linux-x64` (+ `.sha256`) | Linux x86_64 |
+
+也可在 GitHub → Actions → **release** → Run workflow，填已有 tag（如 `v0.2.1`）补传资产。本仓 **不做** npm publish（那是 oss 插件路径）。
 
 ---
 
