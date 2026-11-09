@@ -11,14 +11,17 @@
   Internet users (recommended):
     irm https://raw.githubusercontent.com/lonk1989/webclaw-x/main/scripts/install_workbuddy.ps1 | iex
 
-  CN / GitHub slow — mirrors are tried automatically. Override:
-    $env:WEBCLAW_LITE_BASE = "https://ghfast.top/https://github.com/lonk1989/webclaw-x/releases/latest/download"
+  Default download source (CN): Aliyun OSS
+    https://feixingai-agent.oss-cn-beijing.aliyuncs.com/webclaw-x/v{version}/
+  Fallback: GitHub Releases (then optional ghfast mirrors).
 
   Optional env / params:
     WEBCLAW_VERSION / -Version   tag without v (default 0.2.1; "latest" allowed)
     WEBCLAW_HOME                 install root (default %LOCALAPPDATA%\webclaw)
     WEBCLAW_HOSTS / -Hosts       draft policy hosts (comma-separated)
     WEBCLAW_NO_MERGE=1 / -NoMerge  skip writing WorkBuddy/Cursor mcp.json
+    WEBCLAW_LITE_BASE / WEBCLAW_HOST_URL  override CDN URLs
+    WEBCLAW_OSS_BASE             override OSS root (default feixingai-agent …/webclaw-x)
 #>
 [CmdletBinding()]
 param(
@@ -31,7 +34,8 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
 $Repo = "lonk1989/webclaw-x"
-$Tag = if ($Version -eq "latest") { "latest" } else { "v$($Version.TrimStart('v'))" }
+$Ver = $Version.TrimStart('v')
+$Tag = if ($Ver -eq "latest") { "latest" } else { "v$Ver" }
 $HomeDir = if ($env:WEBCLAW_HOME) { $env:WEBCLAW_HOME } else { Join-Path $env:LOCALAPPDATA "webclaw" }
 $BinDir = Join-Path $HomeDir "bin"
 $HostDir = Join-Path $HomeDir "host"
@@ -39,15 +43,26 @@ $McpDir = Join-Path $HomeDir "mcp"
 $VenvDir = Join-Path $HostDir ".venv"
 $LiteName = "webclaw-lite-windows-x64.exe"
 $LiteDest = Join-Path $BinDir "webclaw-lite.exe"
+$DefaultOssRoot = if ($env:WEBCLAW_OSS_BASE) {
+  $env:WEBCLAW_OSS_BASE.TrimEnd("/")
+} else {
+  "https://feixingai-agent.oss-cn-beijing.aliyuncs.com/webclaw-x"
+}
 
 function Write-Step([string]$msg) { Write-Host "[webclaw-x] $msg" -ForegroundColor Cyan }
 
-function Get-MirrorPrefixes {
-  @(
-    "",
-    "https://ghfast.top/",
-    "https://mirror.ghproxy.com/"
-  )
+function Get-OssDir {
+  if ($Tag -ne "latest") { return "$DefaultOssRoot/v$Ver" }
+  try {
+    $tmp = Join-Path $env:TEMP "webclaw-x-latest.json"
+    curl.exe -fsSL --connect-timeout 10 --max-time 20 -o $tmp "$DefaultOssRoot/latest.json" | Out-Null
+    if ($LASTEXITCODE -eq 0 -and (Test-Path $tmp)) {
+      $j = Get-Content $tmp -Raw | ConvertFrom-Json
+      if ($j.baseUrl) { return ([string]$j.baseUrl).TrimEnd("/") }
+      if ($j.version) { return "$DefaultOssRoot/v$([string]$j.version.TrimStart('v'))" }
+    }
+  } catch { }
+  return "$DefaultOssRoot/v0.2.1"
 }
 
 function Get-ReleaseDirUrls {
@@ -60,49 +75,47 @@ function Get-ReleaseDirUrls {
   if ($env:WEBCLAW_LITE_BASE) {
     $out.Add($env:WEBCLAW_LITE_BASE.TrimEnd("/"))
   }
-  # Mirrors first, then official (CN users often stall on github.com).
-  foreach ($p in @("https://ghfast.top/", "https://mirror.ghproxy.com/", "")) {
-    if ($p) { $out.Add(($p + $official)) } else { $out.Add($official) }
+  # 1) Aliyun OSS (stable for CN)  2) GitHub  3) optional mirrors
+  $out.Add((Get-OssDir))
+  $out.Add($official)
+  foreach ($p in @("https://ghfast.top/", "https://mirror.ghproxy.com/")) {
+    $out.Add(($p + $official))
   }
   return $out | Select-Object -Unique
 }
 
 function Get-SourceZipUrls {
-  $ref = if ($Tag -eq "latest") { "main" } else { $Tag }
   $official = "https://github.com/$Repo/archive/refs/heads/main.zip"
   if ($Tag -ne "latest") {
     $official = "https://github.com/$Repo/archive/refs/tags/$Tag.zip"
   }
-  # also try host zip from release when available
   $hostOfficial = if ($Tag -eq "latest") {
     "https://github.com/$Repo/releases/latest/download/webclaw-x-host.zip"
   } else {
     "https://github.com/$Repo/releases/download/$Tag/webclaw-x-host.zip"
   }
+  $hostOss = "$(Get-OssDir)/webclaw-x-host.zip"
   $out = New-Object System.Collections.Generic.List[string]
   if ($env:WEBCLAW_HOST_URL) { $out.Add($env:WEBCLAW_HOST_URL) }
-  foreach ($p in @("https://ghfast.top/", "https://mirror.ghproxy.com/", "")) {
-    if ($p) {
-      $out.Add($p + $hostOfficial)
-      $out.Add($p + $official)
-    } else {
-      $out.Add($hostOfficial)
-      $out.Add($official)
-    }
+  $out.Add($hostOss)
+  $out.Add($hostOfficial)
+  foreach ($p in @("https://ghfast.top/", "https://mirror.ghproxy.com/")) {
+    $out.Add($p + $hostOfficial)
+    $out.Add($p + $official)
   }
+  $out.Add($official)
   return $out | Select-Object -Unique
 }
 
 function Download-FirstOk([string[]]$urls, [string]$dest) {
   $last = $null
-  # Prefer CN mirrors before raw github.com when no explicit WEBCLAW_LITE_BASE.
-  $ordered = @($urls | Where-Object { $_ -match 'ghfast\.top|ghproxy|WEBCLAW' }) `
-    + @($urls | Where-Object { $_ -notmatch 'ghfast\.top|ghproxy' })
+  # Prefer Aliyun OSS, then everything else in listed order.
+  $ordered = @($urls | Where-Object { $_ -match 'aliyuncs\.com' }) `
+    + @($urls | Where-Object { $_ -notmatch 'aliyuncs\.com' })
   $ordered = $ordered | Where-Object { $_ } | Select-Object -Unique
   foreach ($u in $ordered) {
     try {
       Write-Step "download $u"
-      # TimeoutMs avoids hanging forever on blocked github.com in CN networks.
       curl.exe -fL --connect-timeout 15 --max-time 180 --retry 2 -o $dest $u
       if ($LASTEXITCODE -ne 0) { throw "curl exit $LASTEXITCODE" }
       if ((Get-Item $dest).Length -gt 0) { return $u }

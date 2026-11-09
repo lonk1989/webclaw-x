@@ -26,7 +26,7 @@ irm https://raw.githubusercontent.com/lonk1989/webclaw-x/main/scripts/install_wo
 curl -fsSL https://raw.githubusercontent.com/lonk1989/webclaw-x/main/scripts/install_workbuddy.sh | bash
 ```
 
-脚本会下载预编译 lite、安装 MCP Host、并自动写入 WorkBuddy / Cursor 的 `mcp.json`。完整说明（白名单、升级、国内镜像）：
+脚本会从**阿里云 OSS**下载预编译 lite + MCP Host（失败再回退 GitHub），并自动写入 WorkBuddy / Cursor 的 `mcp.json`。完整说明（白名单、升级、OSS）：
 
 → **[`docs/workbuddy-quickstart.md`](./docs/workbuddy-quickstart.md)**
 

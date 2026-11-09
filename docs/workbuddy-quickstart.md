@@ -12,7 +12,7 @@
 | 系统 | Windows x64 / macOS Apple Silicon / Linux x86_64 |
 | 软件 | [Google Chrome](https://www.google.com/chrome/)（或 Chromium）、[Python 3.10+](https://www.python.org/downloads/)（Windows 安装时勾选 Add to PATH） |
 | 助手 | [腾讯 WorkBuddy](https://copilot.tencent.com/) 或 Cursor（支持自定义 stdio MCP） |
-| 网络 | 能访问 GitHub Releases（国内脚本会自动尝试 `ghfast.top` 等镜像） |
+| 网络 | 默认从**阿里云 OSS**拉包（国内稳定）；失败再回退 GitHub / 镜像 |
 
 ## 一键安装
 
@@ -81,14 +81,32 @@ Cursor：设置 → MCP，确认 `webclaw-x` 已加载后重连。
 
 重跑同一条一键命令（可把 `WEBCLAW_VERSION` 改成新版本或 `latest`）。插件版本戳与 lite 会按新包覆盖。
 
-## 国内网络
+## 国内网络 / OSS
 
-脚本默认按顺序尝试：你自定义的 `WEBCLAW_LITE_BASE` → `ghfast.top` 镜像 → `mirror.ghproxy.com` → 官方 GitHub。  
-若公司有内网 OSS，可事先设置：
+默认下载根：
+
+```text
+https://feixingai-agent.oss-cn-beijing.aliyuncs.com/webclaw-x/v0.2.1/
+```
+
+内含 Win / macOS arm64 / Linux x64 的 `webclaw-lite-*` 与 `webclaw-x-host.zip`（及 `.sha256`）。  
+指针：`https://feixingai-agent.oss-cn-beijing.aliyuncs.com/webclaw-x/latest.json`
+
+安装脚本顺序：**OSS → GitHub → ghfast / ghproxy（仅兜底）**。
+
+发版后同步 OSS（维护者本机）：
 
 ```powershell
-$env:WEBCLAW_LITE_BASE = "https://your-cdn.example.com/webclaw-lite/v0.2.1"
-$env:WEBCLAW_HOST_URL  = "https://your-cdn.example.com/webclaw-x-host-0.2.1.zip"
+# 先把 Release 资产下到某目录，再上传
+node scripts/upload_oss.mjs --version 0.2.1 --dir $env:TEMP\webclaw-x-oss-v0.2.1
+```
+
+覆盖默认 OSS 根或单文件：
+
+```powershell
+$env:WEBCLAW_OSS_BASE = "https://feixingai-agent.oss-cn-beijing.aliyuncs.com/webclaw-x"
+$env:WEBCLAW_LITE_BASE = "https://your-cdn.example.com/webclaw-x/v0.2.1"
+$env:WEBCLAW_HOST_URL  = "https://your-cdn.example.com/webclaw-x-host.zip"
 ```
 
 ## 与蜂行客户端的区别

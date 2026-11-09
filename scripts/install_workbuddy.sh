@@ -11,14 +11,16 @@
 #   WEBCLAW_NO_MERGE=1
 #   WEBCLAW_LITE_BASE=…   # optional CDN / mirror prefix
 #   WEBCLAW_HOST_URL=…    # optional direct host zip URL
+#   WEBCLAW_OSS_BASE=…    # default Aliyun OSS root for webclaw-x
 set -euo pipefail
 
 REPO="lonk1989/webclaw-x"
 VERSION="${WEBCLAW_VERSION:-0.2.1}"
-if [ "$VERSION" = "latest" ]; then
+VER="${VERSION#v}"
+if [ "$VER" = "latest" ]; then
   TAG="latest"
 else
-  TAG="v${VERSION#v}"
+  TAG="v$VER"
 fi
 
 HOME_DIR="${WEBCLAW_HOME:-$HOME/.webclaw}"
@@ -28,6 +30,8 @@ MCP_DIR="$HOME_DIR/mcp"
 VENV="$HOST_DIR/.venv"
 HOSTS="${WEBCLAW_HOSTS:-}"
 NO_MERGE="${WEBCLAW_NO_MERGE:-0}"
+DEFAULT_OSS_ROOT="${WEBCLAW_OSS_BASE:-https://feixingai-agent.oss-cn-beijing.aliyuncs.com/webclaw-x}"
+DEFAULT_OSS_ROOT="${DEFAULT_OSS_ROOT%/}"
 
 uname_s="$(uname -s)"
 uname_m="$(uname -m)"
@@ -57,6 +61,22 @@ official_release_dir() {
   fi
 }
 
+oss_dir() {
+  if [ "$TAG" != "latest" ]; then
+    echo "$DEFAULT_OSS_ROOT/v$VER"
+    return 0
+  fi
+  tmp="$HOST_DIR/_latest.json"
+  if curl -fsSL --connect-timeout 10 --max-time 20 -o "$tmp" "$DEFAULT_OSS_ROOT/latest.json" 2>/dev/null; then
+    base="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8")).get("baseUrl") or "")' "$tmp" 2>/dev/null || true)"
+    if [ -n "$base" ]; then
+      echo "${base%/}"
+      return 0
+    fi
+  fi
+  echo "$DEFAULT_OSS_ROOT/v0.2.1"
+}
+
 # Try URL list; write to dest on first success.
 download_first() {
   dest="$1"
@@ -65,7 +85,7 @@ download_first() {
   for url in "$@"; do
     [ -n "$url" ] || continue
     step "download $url"
-    if curl -fL --retry 2 --connect-timeout 20 -o "$dest" "$url"; then
+    if curl -fL --retry 2 --connect-timeout 15 --max-time 180 -o "$dest" "$url"; then
       if [ -s "$dest" ]; then return 0; fi
     fi
     last="$url"
@@ -81,10 +101,13 @@ write_lite_urls() {
   asset="$2"
   : >"$out"
   official="$(official_release_dir)"
+  oss="$(oss_dir)"
   if [ -n "${WEBCLAW_LITE_BASE:-}" ]; then
     echo "${WEBCLAW_LITE_BASE%/}/$asset" >>"$out"
   fi
-  for prefix in "" "https://ghfast.top/" "https://mirror.ghproxy.com/"; do
+  echo "${oss}/$asset" >>"$out"
+  echo "${official}/$asset" >>"$out"
+  for prefix in "https://ghfast.top/" "https://mirror.ghproxy.com/"; do
     echo "${prefix}${official}/$asset" >>"$out"
   done
 }
@@ -92,6 +115,7 @@ write_lite_urls() {
 write_host_urls() {
   out="$1"
   : >"$out"
+  oss="$(oss_dir)"
   if [ -n "${WEBCLAW_HOST_URL:-}" ]; then
     echo "$WEBCLAW_HOST_URL" >>"$out"
   fi
@@ -102,10 +126,13 @@ write_host_urls() {
     host_zip="https://github.com/$REPO/releases/download/$TAG/webclaw-x-host.zip"
     src_zip="https://github.com/$REPO/archive/refs/tags/$TAG.zip"
   fi
-  for prefix in "" "https://ghfast.top/" "https://mirror.ghproxy.com/"; do
+  echo "${oss}/webclaw-x-host.zip" >>"$out"
+  echo "$host_zip" >>"$out"
+  for prefix in "https://ghfast.top/" "https://mirror.ghproxy.com/"; do
     echo "${prefix}${host_zip}" >>"$out"
     echo "${prefix}${src_zip}" >>"$out"
   done
+  echo "$src_zip" >>"$out"
 }
 
 merge_mcp() {
