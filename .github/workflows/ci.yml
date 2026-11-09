@@ -21,7 +21,8 @@ jobs:
           - os: macos-latest
             artifact: webclaw-lite-macos-arm64
             binary: target/release/webclaw-lite
-          - os: ubuntu-22.04
+          # See release.yml: ort prebuilts need glibc≥2.38 (Ubuntu 24.04+).
+          - os: ubuntu-24.04
             artifact: webclaw-lite-linux-x64
             binary: target/release/webclaw-lite
     runs-on: ${{ matrix.os }}
@@ -32,7 +33,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev
+          sudo apt-get install -y pkg-config libssl-dev build-essential
 
       - uses: dtolnay/rust-toolchain@stable
 

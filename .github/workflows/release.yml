@@ -31,7 +31,9 @@ jobs:
           - os: macos-latest
             asset: webclaw-lite-macos-arm64
             binary: target/release/webclaw-lite
-          - os: ubuntu-22.04
+          # ubuntu-24.04: ort/onnxruntime prebuilts need glibc≥2.38 + newer libstdc++
+          # (__isoc23_strtol / _M_replace_cold). ubuntu-22.04 (glibc 2.35) fails at link.
+          - os: ubuntu-24.04
             asset: webclaw-lite-linux-x64
             binary: target/release/webclaw-lite
     runs-on: ${{ matrix.os }}
@@ -44,7 +46,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev
+          sudo apt-get install -y pkg-config libssl-dev build-essential
 
       - uses: dtolnay/rust-toolchain@stable
 

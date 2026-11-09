@@ -133,7 +133,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 |--------|------|
 | `webclaw-lite-windows-x64.exe` (+ `.sha256`) | Windows AMD64 |
 | `webclaw-lite-macos-arm64` (+ `.sha256`) | macOS Apple Silicon |
-| `webclaw-lite-linux-x64` (+ `.sha256`) | Linux x86_64 |
+| `webclaw-lite-linux-x64` (+ `.sha256`) | Linux x86_64（CI 用 Ubuntu 24.04；需 glibc ≥ 2.38） |
 
 也可在 GitHub → Actions → **release** → Run workflow，填已有 tag（如 `v0.2.1`）补传资产。本仓 **不做** npm publish（那是 oss 插件路径）。
 
