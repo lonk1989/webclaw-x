@@ -1,8 +1,8 @@
-# Mount @lonk1989/webclaw into DeepSeek Harness.
+﻿# Mount @lonk1989/webclaw into DeepSeek Harness.
 #
 # In the DeepSeek Harness workspace:
 #   pnpm add @lonk1989/webclaw
-#   # or: pnpm add E:/Workspace/webclaw-oss/packages/webclaw
+#   # or: pnpm add E:/Workspace/webclaw-x/packages/webclaw
 #   pnpm dsh web --patch examples/cordis.patch.yml
 #
 # Defaults auto-download webclaw-lite from GitHub Releases (Windows / macOS arm64).
@@ -17,7 +17,7 @@
       config:
         registerSkill: true
         recipesRel: recipes
-        # binaryPath: 'E:/Workspace/webclaw-oss/target/release/webclaw-lite.exe'
+        # binaryPath: 'E:/Workspace/webclaw-x/target/release/webclaw-lite.exe'
         # systems:
         #   - id: ehr
         #     name: EHR系统

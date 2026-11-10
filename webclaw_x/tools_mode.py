@@ -14,6 +14,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset(
         "webclaw_list_recipes",
         "webclaw_human_reply",
         "webclaw_cancel",
+        "webclaw_set_display",
     }
 )
 

@@ -1,6 +1,7 @@
 //! 登录结果校验：提交后检测页面错误提示 / 是否仍停在登录页，失败则中断任务
 
 use crate::cdp::CdpClient;
+use crate::live_wait_preview::LiveWaitPreview;
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -30,6 +31,7 @@ pub async fn await_login_outcome_with_timeout(
     timeout_secs: u64,
 ) -> Result<String, String> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let mut preview = LiveWaitPreview::new("登录");
 
     loop {
         if cancel.is_some_and(|f| f.load(Ordering::SeqCst)) {
@@ -39,7 +41,9 @@ pub async fn await_login_outcome_with_timeout(
         match probe_login_outcome(client).await? {
             LoginOutcome::Success(msg) => return Ok(msg),
             LoginOutcome::Failure(msg) => return Err(msg),
-            LoginOutcome::Pending => {}
+            LoginOutcome::Pending => {
+                let _ = preview.tick(client).await;
+            }
         }
 
         if Instant::now() >= deadline {

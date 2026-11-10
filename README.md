@@ -5,7 +5,7 @@
 菜谱 = **指令（动词）** + **目标/参数**；中英动词同一回放路径（如 `打开`/`open`、`等待`/`wait`、`采集`/`collect`）。
 
 > 仓库：<https://github.com/lonk1989/webclaw-x>  
-> 当前发布：[v0.2.1](https://github.com/lonk1989/webclaw-x/releases/tag/v0.2.1)  
+> 当前发布：[v0.2.2](https://github.com/lonk1989/webclaw-x/releases/tag/v0.2.2)  
 > 打 `v*` 标签后 GitHub Actions（`.github/workflows/release.yml`）会构建并上传 **Windows x64 / macOS arm64 / Linux x64** 预编译；也可在 Actions 里对已有 tag 手动 Run workflow。
 
 ---
@@ -26,9 +26,10 @@ irm https://raw.githubusercontent.com/lonk1989/webclaw-x/main/scripts/install_wo
 curl -fsSL https://raw.githubusercontent.com/lonk1989/webclaw-x/main/scripts/install_workbuddy.sh | bash
 ```
 
-脚本会从**阿里云 OSS**下载预编译 lite + MCP Host（失败再回退 GitHub），并自动写入 WorkBuddy / Cursor 的 `mcp.json`。完整说明（白名单、升级、OSS）：
+脚本会从**阿里云 OSS**下载预编译 lite + MCP Host（失败再回退 GitHub），并自动写入 WorkBuddy / Cursor 的 `mcp.json`。  
+MCP 接通后助手会看到**动词指令快卡**（打开/点击/采集 → `webclaw_run`）；人读说明书：
 
-→ **[`docs/workbuddy-quickstart.md`](./docs/workbuddy-quickstart.md)**
+→ **[`docs/workbuddy-quickstart.md`](./docs/workbuddy-quickstart.md)** · **[`docs/recipe-verbs.md`](./docs/recipe-verbs.md)**
 
 ---
 
@@ -80,13 +81,7 @@ AI 助手操作网页时，常见两条路：
 
 ## 安装（终端用户：预编译）
 
-安装脚本默认下载源仍指向旧仓 `webclaw-oss`。安装 **本仓 v0.2.0** 时请显式设置：
-
-```bash
-export WEBCLAW_LITE_BASE=https://github.com/lonk1989/webclaw-x/releases/latest/download
-```
-
-当前该前缀下规划的预编译文件：
+安装脚本默认从本仓 GitHub Releases 拉取预编译（`WEBCLAW_LITE_BASE` 可覆盖）。当前规划资产：
 
 - `webclaw-lite-linux-x64` / `.sha256`（v0.2.0 已发布）
 - `webclaw-lite-windows-x64.exe` / `.sha256`（Windows CLI 构建产物；由发布流程上传后可用）
@@ -149,7 +144,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 ### 发版与多平台预编译（GitHub Actions）
 
-流程与旧仓 `webclaw-oss` 的 `release.yml` 同类：推送 **`v*`** 标签后，CI 在 `windows-latest` / `macos-latest`（arm64）/ `ubuntu-22.04` 上 `cargo build --release -p webclaw --bin webclaw-lite`，并把下列资产挂到该 tag 的 Release：
+推送 **`v*`** 标签后，CI（`.github/workflows/release.yml`）在 `windows-latest` / `macos-latest`（arm64）/ `ubuntu-22.04` 上 `cargo build --release -p webclaw --bin webclaw-lite`，并把下列资产挂到该 tag 的 Release：
 
 | 资产名 | 平台 |
 |--------|------|
@@ -157,7 +152,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 | `webclaw-lite-macos-arm64` (+ `.sha256`) | macOS Apple Silicon |
 | `webclaw-lite-linux-x64` (+ `.sha256`) | Linux x86_64（CI 用 Ubuntu 24.04；需 glibc ≥ 2.38） |
 
-也可在 GitHub → Actions → **release** → Run workflow，填已有 tag（如 `v0.2.1`）补传资产。本仓 **不做** npm publish（那是 oss 插件路径）。
+也可在 GitHub → Actions → **release** → Run workflow，填已有 tag（如 `v0.2.2`）补传资产。本仓 **不做** npm publish（那是 oss 插件路径）。
 
 ---
 
@@ -175,7 +170,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
         "PYTHONPATH": "/path/to/webclaw-x",
         "WEBCLAW_LITE_BIN": "/home/YOU/.webclaw/bin/webclaw-lite",
         "WEBCLAW_HOME": "/home/YOU/.webclaw",
-        "WEBCLAW_HEADLESS": "0",
+        "WEBCLAW_HEADLESS": "1",
         "WEBCLAW_TOOLS": "core",
         "WEBCLAW_STATUS_MODE": "fast"
       }
@@ -322,6 +317,7 @@ cd /path/to/webclaw-x
 ```text
 webclaw_x/          Python MCP 网关
 runtime/            内嵌 webclaw-lite（Rust）源码
+packages/webclaw/   DSH 插件 @lonk1989/webclaw（蜂行 / DeepSeek Harness）
 scripts/            安装、评测、policy 草稿、工具调用
 skills/SKILL.md     给 AI Host 的一页上手
 recipes/            fixture 菜谱
@@ -342,5 +338,5 @@ examples/           更多示例与编写指南
 ## 许可与上游归因
 
 - 本仓库采用 **MIT** 许可，见 [LICENSE](./LICENSE)
-- 浏览器引擎源自 MIT 项目 [webclaw-oss](https://github.com/lonk1989/webclaw-oss)；本仓以 monorepo 形式收纳 `runtime/`，MCP Host 仍通过子进程调用 lite
+- 本仓为唯一真源：`runtime/`（lite）+ `webclaw_x/`（MCP）+ `packages/webclaw`（DSH 插件 `@lonk1989/webclaw`）；历史上游 webclaw-oss 已废弃
 - 关系、查找路径与非目标见 [FORK.md](./FORK.md) 与 [runtime/PROVENANCE.md](./runtime/PROVENANCE.md)

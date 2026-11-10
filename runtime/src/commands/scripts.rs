@@ -45,8 +45,8 @@ pub fn parse_click_text_args(args: &str) -> Option<(String, u32)> {
     if raw.is_empty() || is_structural_target(raw) {
         return None;
     }
-    // 0 = must be unique (no silent first-match). Explicit #N sets >= 1. (webclaw-x P0)
-    let mut match_index = 0u32;
+    // No #N → default #1 (rank-first). Explicit #N sets >= 1.
+    let mut match_index = 1u32;
     let mut query = raw.to_string();
     if let Some(hash_pos) = query.rfind('#') {
         let after = &query[hash_pos + 1..];
@@ -3387,7 +3387,8 @@ return {
 pub const WAIT_PAGE: &str = r#"
 // wait-smart-v7 — 纯数字等待忽略尾部顿号/逗号；等待文字不要求在视口内
 const DEFAULT_TIMEOUT = 30;
-const DOWNLOAD_DEFAULT_TIMEOUT = 200;
+/** Bare「等待下载」default — explicit「等待下载200」still honors 200. */
+const DOWNLOAD_DEFAULT_TIMEOUT = 30;
 const POLL_MS = 300;
 
 const coalesce = (...vals) => {
@@ -3686,7 +3687,7 @@ switch (parsed.mode) {
     return { ok: true, message: '元素已可见：' + r.matched };
   }
   default:
-    return { ok: false, error: '无法识别的等待参数「' + parsed.body + '」。支持：2、登录、登录10、文字登录10、选择器#btn15、消失加载中10、加载10、下载（默认200）、下载60、按钮#2 10' };
+    return { ok: false, error: '无法识别的等待参数「' + parsed.body + '」。支持：2、登录、登录10、文字登录10、选择器#btn15、消失加载中10、加载10、下载（默认30）、下载200、按钮#2 10' };
 }
 "#;
 
@@ -4563,7 +4564,7 @@ mod tests {
     fn parse_click_text_args_basic() {
         assert_eq!(
             super::parse_click_text_args("作业过程监管"),
-            Some(("作业过程监管".into(), 0))
+            Some(("作业过程监管".into(), 1))
         );
         assert_eq!(
             super::parse_click_text_args("作业过程监管#2"),
@@ -4571,7 +4572,7 @@ mod tests {
         );
         assert_eq!(
             super::parse_click_text_args("确定，"),
-            Some(("确定".into(), 0))
+            Some(("确定".into(), 1))
         );
         assert_eq!(
             super::parse_click_text_args("确定#2，"),

@@ -1,68 +1,49 @@
 # Fork provenance — webclaw-x (monorepo)
 
-**webclaw-x** is the primary engineering tree for the “webclaw 二次改造” plan: MCP Host + vendored Rust runtime.
+**webclaw-x** 是当前唯一工程真源：MCP Host + 自带 Rust 运行时 + DSH Cordis 插件。
 
 | Tree | Role |
 |------|------|
-| This repo (`webclaw-x`) | **Primary.** Python MCP gateway (`webclaw_x/`) + vendored `runtime/` (`webclaw-lite`) |
-| Upstream source | [`webclaw-oss`](https://github.com/lonk1989/webclaw-oss) (MIT) — original Rust engine / DSH / desktop |
-| Local sibling checkout | `/workspace/webclaw-oss` — **kept as read-only mirror / contrast**; not deleted by the monorepo import |
-| Local MCP precursor | `/workspace/webclaw-mcp` (absorbed into `webclaw_x/`) |
+| This repo (`webclaw-x`) | **唯一真源。** `webclaw_x/`（Python MCP）+ `runtime/`（`webclaw-lite`）+ `packages/webclaw`（`@lonk1989/webclaw` DSH 插件） |
+| Historical upstream | 原 [webclaw-oss](https://github.com/lonk1989/webclaw-oss)（MIT）已废弃；勿再改、勿再当依赖路径 |
 
 ## Relationship
 
-- **Runtime source of truth for this fork:** `runtime/` in this repo (imported from oss tip `f48483c`, local).
-- **Compile-time assets also vendored:** `examples/` and `skills/webclaw{,-lite}/` (required by Rust `include_str!`; x’s own `skills/SKILL.md` kept).
-- **Process split unchanged:** MCP Host still launches `webclaw-lite` as a **subprocess**. Rust and Python are not merged into one process.
-- **Binary lookup** (`webclaw_x/lite_bin.py`), first existing file wins:
-  1. `WEBCLAW_LITE_BIN` (explicit override)
-  2. `<repo>/target/release/webclaw-lite` (in-monorepo cargo build)
-  3. `<repo>/bin-webclaw-lite` (compat symlink)
-  4. `~/.webclaw/bin/webclaw-lite`
-  5. `/workspace/webclaw-oss/target/release/webclaw-lite` (legacy sibling transition)
-- License: MIT (same as upstream). Keep root `LICENSE` when redistributing. See also `runtime/PROVENANCE.md`.
+- **引擎：** `runtime/`（`cargo build --release -p webclaw --bin webclaw-lite`）
+- **DSH 插件：** `packages/webclaw`（`@lonk1989/webclaw`）；本地热更：`cd packages/webclaw && npm run sync:local`
+- **MCP Host：** `webclaw_x/`，仍以**子进程**调用 lite（不合并进程）
+- **二进制查找**（`webclaw_x/lite_bin.py`），先命中先用：
+  1. `WEBCLAW_LITE_BIN`
+  2. `<repo>/target/release/webclaw-lite[.exe]`
+  3. `<repo>/bin-webclaw-lite`
+  4. `~/.webclaw/bin/webclaw-lite`（Windows：`%LOCALAPPDATA%\webclaw\bin\`）
+- License: MIT。见根目录 `LICENSE` 与 `runtime/PROVENANCE.md`。
 
-## Build runtime from this repo
+## Build runtime
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH"   # prefer rustup toolchain, not distro rustc
-cd /workspace/webclaw-x
-./scripts/build_runtime.sh            # cargo build --release -p webclaw --bin webclaw-lite
-                                      # + install → ~/.webclaw/bin/webclaw-lite
-# or:
-#   cargo build --release -p webclaw --bin webclaw-lite
-#   ./scripts/build_runtime.sh --no-install
+cd /path/to/webclaw-x
+./scripts/build_runtime.sh
+# or: cargo build --release -p webclaw --bin webclaw-lite
 ```
+
+## Sync DSH plugin into 蜂行
+
+```bash
+cd packages/webclaw
+npm install
+npm run sync:local          # cargo lite + copy into fengxing bundle
+# or: npm run sync:local:plugin
+```
+
+蜂行 `ensure-webclaw.mjs` 默认本地路径：`E:/Workspace/webclaw-x/packages/webclaw`。
 
 ## Non-goals
 
 - Not a reimplementation of the CDP runtime.
 - Not folding Host + lite into a single process.
-- Not an enterprise corp-session cloud.
-- Does not ship real MES credentials or production recipes with secrets.
+- Not shipping real MES credentials.
 
-## Historical patches (pre-monorepo)
+## Historical patches
 
-Patches under `patches/` were originally applied against a separate `/workspace/webclaw-oss` checkout. After the monorepo import, prefer editing `runtime/` here directly. Rollback notes below still describe the intent of each change.
-
-| Patch | Files (now under this repo) | Rollback hint |
-|-------|------------------------------|---------------|
-| 0001 ambiguous click | `runtime/src/commands/scripts.rs`, `frame_eval.rs` | restore files; binary bak `webclaw-lite.pre-0001.bak` |
-| dualwrite-in-Rust | `runtime/src/page_collect.rs`, `runtime/src/commands/runtime.rs` | restore files; `webclaw-lite.pre-dualwrite.bak` |
-| P1 Component Pack | `component_pack.rs` 等 | `patches/ROLLBACK.md`；`webclaw-lite.pre-p1-components.bak` |
-
-## P1 导航策略与可续跑 HITL
-
-Rust 增加 `navigation_policy.rs`，接到 CDP navigate；`打开/open`、新标签、probe 共用。
-MCP 增加 `webclaw_x/jobs.py` 进程生命周期与 prompt 作用域，沿用上游 FileHumanBridge。
-本轮最小补丁与精确快照见 `patches/0003-policy-hitl.patch` / `patches/pre-policy-hitl/`。
-
-## P1 Recipe Library overlay
-
-仅 Python 层：不可覆盖的递增版本、环境模板绑定、MCP/CLI 与旧平铺兼容。
-
-## P1 Self-Heal（单步 Rust 包装 + MCP 契约）
-
-Runtime 新增 `runtime/src/self_heal.rs`，`executor.rs` 原单步逻辑保留为 `execute_step_once`。
-Overlay：`server.py` / `errors.py` 新增 `heal_trace` 与 `NEED_REPAIR` / `HEAL_CONFIG_INVALID`。
-详细行为见 `docs/self-heal.md`，精确回滚见 `patches/ROLLBACK.md`。
+`patches/` 记录早期对独立 oss 仓的改动；现一律改本仓 `runtime/` / `webclaw_x/` / `packages/webclaw`。

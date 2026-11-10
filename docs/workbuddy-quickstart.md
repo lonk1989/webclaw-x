@@ -2,7 +2,7 @@
 
 面向**任意互联网用户**：不 clone 仓库、不碰 cargo、不依赖蜂行 / DSH 客户端。装好后在 WorkBuddy（或 Cursor）里直接调用 `webclaw_*` 工具。
 
-> 当前钉选版本：**v0.2.1**（可用环境变量改成 `latest`）。  
+> 当前钉选版本：**v0.2.2**（可用环境变量改成 `latest`）。  
 > 仓库：<https://github.com/lonk1989/webclaw-x>
 
 ## 你需要什么
@@ -27,7 +27,7 @@ irm https://raw.githubusercontent.com/lonk1989/webclaw-x/main/scripts/install_wo
 可选：指定业务域名白名单草稿、版本：
 
 ```powershell
-$env:WEBCLAW_VERSION = "0.2.1"
+$env:WEBCLAW_VERSION = "0.2.2"
 $env:WEBCLAW_HOSTS = "app.example.com,login.example.com"
 irm https://raw.githubusercontent.com/lonk1989/webclaw-x/main/scripts/install_workbuddy.ps1 | iex
 ```
@@ -39,7 +39,7 @@ curl -fsSL https://raw.githubusercontent.com/lonk1989/webclaw-x/main/scripts/ins
 ```
 
 ```bash
-export WEBCLAW_VERSION=0.2.1
+export WEBCLAW_VERSION=0.2.2
 export WEBCLAW_HOSTS='app.example.com,login.example.com'
 curl -fsSL https://raw.githubusercontent.com/lonk1989/webclaw-x/main/scripts/install_workbuddy.sh | bash
 ```
@@ -56,13 +56,34 @@ curl -fsSL https://raw.githubusercontent.com/lonk1989/webclaw-x/main/scripts/ins
 
 不想改助手配置时：`$env:WEBCLAW_NO_MERGE=1` 或 `WEBCLAW_NO_MERGE=1`。
 
+## 接通后：助手如何用（必读）
+
+WorkBuddy / Cursor 连接 MCP 后，模型会收到内置 **instructions（动词快卡）**。  
+人也请打开本机副本（安装脚本已写入）：
+
+- `%LOCALAPPDATA%\webclaw\mcp\RECIPE-VERBS.md`
+- 或仓库 [docs/recipe-verbs.md](./recipe-verbs.md)
+
+**核心约定：**
+
+| 你说 | 助手应调用 |
+|------|------------|
+| 打开 MES / 打开 https://… | `webclaw_run`，菜谱里带动词 `打开…` |
+| 打开…，点击…，采集… | **一句菜谱**一次 `webclaw_run` |
+| 有哪些网站账号 | 才查 accounts（查列表 ≠ 已打开） |
+| 改成有头 / 弹出浏览器 | `webclaw_set_display(headless=false)` |
+| 改成无头 / 不要弹窗 | `webclaw_set_display(headless=true)` |
+
+默认**无头**跑（不弹系统 Chrome）。不要期望助手只查保险箱就完成「打开」；「打开」是 webclaw 动词指令。
+
 ## 接通 WorkBuddy
 
 1. **完全退出并重新打开** WorkBuddy（或在插件 → MCP 里刷新）
 2. 确认 `webclaw-x` 显示可用（绿灯）
 3. 对话示例：
+   - 「打开 https://example.com，等待 2，采集」
+   - 「打开 MES」（需保险箱里已有对应站点名）
    - 「用 webclaw 查一下 status」
-   - 粘贴一整段菜谱，要求**一次**执行（不要逐步点）
 
 Cursor：设置 → MCP，确认 `webclaw-x` 已加载后重连。
 
@@ -89,7 +110,7 @@ Cursor：设置 → MCP，确认 `webclaw-x` 已加载后重连。
 默认下载根：
 
 ```text
-https://feixingai-agent.oss-cn-beijing.aliyuncs.com/webclaw-x/v0.2.1/
+https://feixingai-agent.oss-cn-beijing.aliyuncs.com/webclaw-x/v0.2.2/
 ```
 
 内含 Win / macOS arm64 / Linux x64 的 `webclaw-lite-*` 与 `webclaw-x-host.zip`（及 `.sha256`）。  
@@ -101,14 +122,14 @@ https://feixingai-agent.oss-cn-beijing.aliyuncs.com/webclaw-x/v0.2.1/
 
 ```powershell
 # 先把 Release 资产下到某目录，再上传
-node scripts/upload_oss.mjs --version 0.2.1 --dir $env:TEMP\webclaw-x-oss-v0.2.1
+node scripts/upload_oss.mjs --version 0.2.2 --dir $env:TEMP\webclaw-x-oss-v0.2.2
 ```
 
 覆盖默认 OSS 根或单文件：
 
 ```powershell
 $env:WEBCLAW_OSS_BASE = "https://feixingai-agent.oss-cn-beijing.aliyuncs.com/webclaw-x"
-$env:WEBCLAW_LITE_BASE = "https://your-cdn.example.com/webclaw-x/v0.2.1"
+$env:WEBCLAW_LITE_BASE = "https://your-cdn.example.com/webclaw-x/v0.2.2"
 $env:WEBCLAW_HOST_URL  = "https://your-cdn.example.com/webclaw-x-host.zip"
 ```
 

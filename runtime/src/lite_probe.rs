@@ -78,9 +78,7 @@ fn parse_args(args: &[String]) -> Result<ProbeArgs, String> {
 }
 
 fn lite_headless() -> bool {
-    std::env::var("WEBCLAW_HEADLESS")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    crate::display::resolve_headless(None)
 }
 
 /// Attach to existing worker CDP browser, or launch a shared "lite" profile once.

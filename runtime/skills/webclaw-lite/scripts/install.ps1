@@ -8,7 +8,7 @@ $base = $env:WEBCLAW_LITE_BASE
 $url = $env:WEBCLAW_WORKER_URL
 if (-not $url) {
   if (-not $base) {
-    $base = "https://github.com/lonk1989/webclaw-oss/releases/latest/download"
+    $base = "https://github.com/lonk1989/webclaw-x/releases/latest/download"
   }
   $url = ($base.TrimEnd("/") + "/webclaw-lite-windows-x64.exe")
 }

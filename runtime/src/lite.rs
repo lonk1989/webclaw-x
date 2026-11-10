@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 pub const DEFAULT_STATIC_BASE: &str = "";
 
 const GITHUB_LATEST_DIR: &str =
-    "https://github.com/lonk1989/webclaw-oss/releases/latest/download";
+    "https://github.com/lonk1989/webclaw-x/releases/latest/download";
 
 /// GitHub Releases "latest" asset URL for this host OS/arch.
 pub fn default_github_latest_url() -> String {
@@ -37,7 +37,7 @@ pub fn default_github_latest_url() -> String {
 
 /// Backward-compatible alias (Windows x64 latest URL).
 pub const DEFAULT_GITHUB_LATEST_EXE: &str =
-    "https://github.com/lonk1989/webclaw-oss/releases/latest/download/webclaw-lite-windows-x64.exe";
+    "https://github.com/lonk1989/webclaw-x/releases/latest/download/webclaw-lite-windows-x64.exe";
 
 pub fn default_download_url() -> String {
     if let Ok(u) = std::env::var("WEBCLAW_WORKER_URL") {
@@ -81,6 +81,7 @@ pub fn print_usage() {
   webclaw-lite install
   webclaw-lite status [--run-id <id>]
   webclaw-lite prewarm
+  webclaw-lite browser status|stop|restart
   webclaw-lite serve [--socket <path>]   # daemon：ping/status/prewarm/run/cancel/human-reply/collect/quit（Unix socket；Windows=127.0.0.1 TCP + endpoint 文件）
   webclaw-lite probe [--url URL] [--types 输入框,按钮,图标按钮,链接] [--search 关键词] [--limit 60]
   webclaw-lite recipe save --name <stem> (--stdin | --file <path>) [--title 标题]
@@ -111,7 +112,9 @@ pub fn print_usage() {
   WEBCLAW_HOME          数据根（默认 %LOCALAPPDATA%\\\\webclaw 或 ~/.webclaw）
   WEBCLAW_CHROME        Chrome/Edge 可执行文件
   WEBCLAW_CDP_PORT      CDP 端口（默认 19222）
-  WEBCLAW_HEADLESS      设为 1 时无头启动 Chrome（默认弹出可见窗口）
+  WEBCLAW_HEADLESS      0=有头窗口；未设时看 $WEBCLAW_HOME/display.json，默认无头
+  webclaw-lite display [--headless 0|1]   # 读写显示偏好（对话切换有头/无头）
+  webclaw-lite browser status|stop|restart  # 查询/关闭/重启本机 CDP 浏览器（勿用 PowerShell 杀进程）
   WEBCLAW_CHROME_RECYCLE 设为 1 时强制杀再启浏览器（默认复用健康 CDP）
   WEBCLAW_LITE_SOCKET   serve endpoint（Unix=socket 路径；Windows=endpoint JSON 文件，默认 <WEBCLAW_HOME>/lite.sock）
   WEBCLAW_LITE_USE_SERVE Host 设为 1 时优先走常驻 serve（缺省仍 CLI；不可达则回退 CLI，不重复执行）
@@ -121,7 +124,7 @@ pub fn print_usage() {
   WEBCLAW_CAPTCHA_OCR   设为 0 时关闭验证码 RapidOCR 试填（默认开，失败回落 HITL）
   WEBCLAW_CAPTCHA_OCR_MIN_CONF 验证码 OCR 最低置信度（默认 0.60）
   WEBCLAW_CAPTCHA_OCR_TIMEOUT_MS 验证码 OCR 超时毫秒（默认 20000；Windows DirectML 实测单次约 3–16s（视负载））
-  WEBCLAW_CAPTCHA_OCR_SUBMIT 设为 1 时 OCR 后自动点登录（默认只填不交）
+  WEBCLAW_CAPTCHA_OCR_SUBMIT 设为 0 时 OCR 只填不交（默认试填并自动点登录；错了再 HITL）
   WEBCLAW_HUMAN_DIR     人机交换目录（默认 <run>/human）
   WEBCLAW_WORKER_URL    update 下载地址（完整 URL）
   WEBCLAW_LITE_BASE     静态站/Release 目录前缀（拼平台资产名；
@@ -365,13 +368,7 @@ fn human_reply_cli(args: &[String]) -> Result<(), String> {
 
 fn lite_prewarm() -> Result<(), String> {
     ensure_lite_env();
-    let headless = std::env::var("WEBCLAW_HEADLESS")
-        .ok()
-        .map(|v| {
-            let t = v.trim();
-            t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
-        })
-        .unwrap_or(false);
+    let headless = crate::display::resolve_headless(None);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -392,6 +389,113 @@ fn lite_prewarm() -> Result<(), String> {
         })
     );
     Ok(())
+}
+
+fn lite_runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+fn lite_browser_status() -> Result<(), String> {
+    ensure_lite_env();
+    let port = crate::chrome::worker_cdp_port();
+    let pid = crate::chrome::find_listener_pid(port);
+    let rt = lite_runtime()?;
+    let ready = rt.block_on(crate::chrome::is_debug_port_ready_on(port));
+    println!(
+        "{}",
+        json!({
+            "type": "browser_status",
+            "ok": true,
+            "port": port,
+            "cdpReady": ready,
+            "pid": pid,
+            "headless": crate::display::resolve_headless(None),
+        })
+    );
+    Ok(())
+}
+
+fn lite_browser_stop() -> Result<(), String> {
+    ensure_lite_env();
+    let port = crate::chrome::worker_cdp_port();
+    let pid_before = crate::chrome::find_listener_pid(port);
+    crate::browser_network::drop_port_capture(port);
+    crate::chrome::kill_listeners_on_port(port);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let rt = lite_runtime()?;
+    if rt.block_on(crate::chrome::is_debug_port_ready_on(port)) {
+        crate::chrome::kill_listeners_on_port(port);
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    }
+    let ready = rt.block_on(crate::chrome::is_debug_port_ready_on(port));
+    let stopped = !ready;
+    let pid_after = crate::chrome::find_listener_pid(port);
+    println!(
+        "{}",
+        json!({
+            "type": "browser_stop",
+            "ok": stopped,
+            "port": port,
+            "stopped": stopped,
+            "cdpReady": ready,
+            "pidBefore": pid_before,
+            "pidAfter": pid_after,
+        })
+    );
+    if !stopped {
+        return Err(format!(
+            "BROWSER_STOP_FAILED: 端口 {port} 仍在监听 (before={pid_before:?}, after={pid_after:?})"
+        ));
+    }
+    Ok(())
+}
+
+fn lite_browser_restart_inner(task_id: &str) -> Result<(u16, bool, String), String> {
+    ensure_lite_env();
+    let headless = crate::display::resolve_headless(None);
+    let rt = lite_runtime()?;
+    let (port, msg) = rt.block_on(crate::chrome::restart_worker_chrome(headless, task_id))?;
+    // Explicit restart consumed any pending mode-change marker.
+    let _ = crate::display::take_mode_change_recycle();
+    Ok((port, headless, msg))
+}
+
+fn lite_browser_restart() -> Result<(), String> {
+    let (port, headless, msg) = lite_browser_restart_inner("browser-restart")?;
+    println!(
+        "{}",
+        json!({
+            "type": "browser_restart",
+            "ok": true,
+            "port": port,
+            "message": msg,
+            "headless": headless,
+            "cdpReady": true,
+        })
+    );
+    Ok(())
+}
+
+fn lite_browser_cli(args: &[String]) -> Result<(), String> {
+    let sub = args.get(2).map(|s| s.as_str()).unwrap_or("");
+    match sub {
+        "status" => lite_browser_status(),
+        "stop" => lite_browser_stop(),
+        "restart" => lite_browser_restart(),
+        "-h" | "--help" | "help" | "" => {
+            println!("usage: webclaw-lite browser status|stop|restart");
+            println!("  status   CDP 端口是否就绪 / 监听 pid");
+            println!("  stop     关闭本机 webclaw Chrome 实例（释放 CDP 端口）");
+            println!("  restart  强制停掉并重新拉起浏览器");
+            Ok(())
+        }
+        other => Err(format!(
+            "未知子命令: {other}（可用 status、stop、restart）"
+        )),
+    }
 }
 
 /// Shared serve-session state (Unix socket + Windows TCP).
@@ -585,6 +689,9 @@ fn serve_op_run(req: &serde_json::Value, shared: &std::sync::Arc<ServeShared>) -
         }
     };
     let (text, title, params) = parsed;
+    if let Some(h) = req.get("headless").and_then(|v| v.as_bool()) {
+        crate::display::apply_cli_headless_flag(h);
+    }
     let early_hitl = serve_req_truthy(req, "early_hitl");
 
     if !early_hitl {
@@ -1085,13 +1192,7 @@ fn handle_serve_conn_tcp(
 
 fn lite_prewarm_value() -> Result<serde_json::Value, String> {
     ensure_lite_env();
-    let headless = std::env::var("WEBCLAW_HEADLESS")
-        .ok()
-        .map(|v| {
-            let t = v.trim();
-            t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
-        })
-        .unwrap_or(false);
+    let headless = crate::display::resolve_headless(None);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1155,6 +1256,10 @@ fn lite_status(run_id: Option<&str>) -> Result<(), String> {
             obj.insert("skillProvider".into(), json!("local"));
             obj.insert("corpSignedIn".into(), json!(false));
             obj.insert("corpUser".into(), serde_json::Value::Null);
+            obj.insert(
+                "headless".into(),
+                json!(crate::display::resolve_headless(None)),
+            );
         }
         println!("{}", serde_json::to_string(&v).unwrap_or_default());
     })
@@ -1257,6 +1362,80 @@ pub fn run_cli() {
                 std::process::exit(2);
             }
         },
+        "browser" => match lite_browser_cli(&args) {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(2);
+            }
+        },
+        "display" => {
+            ensure_lite_env();
+            let mut headless_arg: Option<bool> = None;
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--headless" => {
+                        i += 1;
+                        let v = args.get(i).map(|s| s.as_str()).unwrap_or("1");
+                        headless_arg = Some(v != "0" && !v.eq_ignore_ascii_case("false"));
+                    }
+                    "--headed" => headless_arg = Some(false),
+                    "-h" | "--help" => {
+                        println!("usage: webclaw-lite display [--headless 0|1] [--headed]");
+                        std::process::exit(0);
+                    }
+                    other => {
+                        eprintln!("未知参数: {other}");
+                        std::process::exit(2);
+                    }
+                }
+                i += 1;
+            }
+            let prefs = match headless_arg {
+                Some(h) => match crate::display::set_headless_pref(h) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(2);
+                    }
+                },
+                None => crate::display::load_prefs(),
+            };
+            let effective = crate::display::resolve_headless(None);
+            // 接管/切模式必须立刻回收 Chrome：display CLI 进程退出后内存 recycle 标志会丢，
+            // 仅写 display.json 再复用无头实例时，用户看不见窗口。
+            // 静默重启（勿 println），避免污染本命令唯一的 JSON stdout。
+            let mut recycled = false;
+            let mut recycle_note = String::new();
+            let mut recycle_port: Option<u16> = None;
+            if headless_arg.is_some() {
+                match lite_browser_restart_inner("display-mode") {
+                    Ok((port, _hl, msg)) => {
+                        recycled = true;
+                        recycle_port = Some(port);
+                        recycle_note = msg;
+                    }
+                    Err(e) => {
+                        recycle_note = format!("browser restart after display change failed: {e}");
+                        eprintln!("{recycle_note}");
+                    }
+                }
+            }
+            println!(
+                "{}",
+                json!({
+                    "type": "display",
+                    "headless": prefs.headless,
+                    "effective": effective,
+                    "recycled": recycled,
+                    "recycleNote": recycle_note,
+                    "port": recycle_port,
+                    "path": crate::display::display_file().display().to_string(),
+                })
+            );
+            std::process::exit(0);
+        }
         "serve" => {
             #[cfg(unix)]
             {

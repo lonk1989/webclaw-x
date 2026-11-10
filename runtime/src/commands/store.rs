@@ -597,6 +597,8 @@ fn refresh_builtin_press_script(commands: &mut Vec<CommandDef>) -> bool {
 /// 将旧版固定 sleep「等待」升级为 wait-smart-v7 可编辑脚本
 fn refresh_builtin_wait_script(commands: &mut Vec<CommandDef>) -> bool {
     let mut changed = false;
+    const WANT_DESC: &str =
+        "智能等待：2 | 加载10 | 遮罩 | 文字登录10 | 选择器#btn15 | 按钮#2 10 | 下载（默认30，可写下载200）；文字=页上真实可见字（勿写「首页加载完成」等状态句，勿默认「首页」）";
     if let Some(cmd) = commands
         .iter_mut()
         .find(|c| c.id == "builtin_wait" && c.builtin)
@@ -610,8 +612,10 @@ fn refresh_builtin_wait_script(commands: &mut Vec<CommandDef>) -> bool {
             || cmd.script.contains("click-text-ranking-v1")
         {
             cmd.script = super::scripts::compose_script(super::scripts::WAIT_PAGE);
-            cmd.description =
-                "智能等待：2 | 文字登录10 | 选择器#btn15 | 按钮#2 10 | 加载10 | 下载（默认200）；文字不要求滚进视口".into();
+            changed = true;
+        }
+        if cmd.description != WANT_DESC {
+            cmd.description = WANT_DESC.into();
             changed = true;
         }
     }

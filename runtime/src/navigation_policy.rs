@@ -8,11 +8,19 @@ struct Policy {
     enabled: bool,
     allow_localhost: bool,
     allowed_hosts: Vec<String>,
+    /// Human-readable note in install/example files; ignored at runtime.
+    #[serde(default, rename = "_comment")]
+    comment: Option<String>,
 }
 impl Default for Policy {
     fn default() -> Self {
         // Public / product default: off. Opt in via policy.json enabled:true + allowed_hosts.
-        Self { enabled: false, allow_localhost: true, allowed_hosts: Vec::new() }
+        Self {
+            enabled: false,
+            allow_localhost: true,
+            allowed_hosts: Vec::new(),
+            comment: None,
+        }
     }
 }
 impl Policy {
@@ -79,6 +87,7 @@ mod tests {
             enabled: true,
             allow_localhost: true,
             allowed_hosts: Vec::new(),
+            ..Policy::default()
         };
         for u in ["http://localhost:8000", "http://127.0.0.1:123", "http://[::1]:9000", "about:blank"] {
             assert!(on.check(u).is_ok(), "{u}");
@@ -89,5 +98,15 @@ mod tests {
     fn malformed_policy_is_not_silently_ignored() {
         assert!(serde_json::from_str::<Policy>(r#"{"allowed_hosts":"*"}"#).is_err());
         assert!(serde_json::from_str::<Policy>(r#"{"allowd_hosts":[]}"#).is_err());
+    }
+
+    #[test]
+    fn install_comment_field_is_accepted() {
+        let p: Policy = serde_json::from_str(
+            r#"{"enabled":false,"allow_localhost":true,"allowed_hosts":[],"_comment":"Default off"}"#,
+        )
+        .expect("_comment must not invalidate policy.json");
+        assert!(!p.enabled);
+        assert!(p.check("https://example.com").is_ok());
     }
 }

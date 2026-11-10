@@ -21,7 +21,7 @@ use chrono::Local;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use crate::run_user_log::{
     self, failure_analysis_detail_hint, format_user_failure_analysis, format_user_footer,
     format_user_header, format_user_step_fail, format_user_step_ok, user_step_summary,
@@ -396,6 +396,7 @@ pub async fn execute_recipe_for_task_from_with_params<R: Runtime>(
         crate::run_sink::emit_event(crate::run_sink::RunEvent::RunStart {
             run_id: task_id.to_string(),
             title: title.to_string(),
+            run_dir: session.run_dir.display().to_string(),
         });
         crate::run_sink::emit_log(format!(
             "run_dir={} human_dir={} cdp_port={}",
@@ -526,11 +527,9 @@ pub async fn execute_recipe_for_task_from_with_params<R: Runtime>(
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
     let use_shared_debug = task_id == "main";
-    // 伙伴空间 worker 无桌面，保持无头。本机 lite 默认弹出可见窗口（WEBCLAW_HEADLESS=1 可改回无头）。
+    // 伙伴空间 worker 无桌面，保持无头。本机 lite：默认无头（display.json / WEBCLAW_HEADLESS / 默认 true）。
     let chrome_headless = if std::env::var_os("WEBCLAW_LITE").is_some() {
-        std::env::var("WEBCLAW_HEADLESS")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
+        crate::display::resolve_headless(None)
     } else if worker_persist {
         true
     } else if use_shared_debug {
@@ -872,6 +871,9 @@ pub async fn execute_recipe_for_task_from_with_params<R: Runtime>(
 
     let mut ok_count = 0u32;
     let mut fail_count = 0u32;
+    let mut last_live_preview_at = Instant::now()
+        .checked_sub(Duration::from_secs(10))
+        .unwrap_or_else(Instant::now);
     let mut last_anchor: Option<RecoveryAnchor> = None;
     let mut focus_ctx = commands::FocusContext::default();
     let mut login_form = captcha::LoginFormSnapshot::default();
@@ -1898,6 +1900,17 @@ pub async fn execute_recipe_for_task_from_with_params<R: Runtime>(
                 if let Some(anchor) = page_recovery::anchor_after_success(&step) {
                     last_anchor = Some(anchor);
                 }
+                maybe_write_live_preview(
+                    &mut client,
+                    &session,
+                    &mut last_live_preview_at,
+                    idx as u32,
+                    total,
+                    &step.keyword,
+                    chrome_headless,
+                    control,
+                )
+                .await;
                 // 试探分支最后一步成功 → 整组试探成功，后续备选将被跳过
                 if let Some(og) = &step.or_group {
                     if og.branch == OrBranch::Try {
@@ -2481,6 +2494,34 @@ pub async fn execute_recipe_for_task_from_with_params<R: Runtime>(
     }
 }
 
+/// Throttled live preview for DSH sidebar (≥800ms between captures).
+async fn maybe_write_live_preview(
+    client: &mut CdpClient,
+    session: &std::sync::Arc<RunSession>,
+    last_at: &mut Instant,
+    step_index: u32,
+    total: u32,
+    keyword: &str,
+    headless: bool,
+    control: &TaskControl,
+) {
+    if last_at.elapsed() < Duration::from_millis(800) {
+        return;
+    }
+    if client.ensure_attached().await.is_err() {
+        return;
+    }
+    match client.capture_screenshot_png().await {
+        Ok(png) => {
+            match session.write_live_preview(&png, step_index, total, keyword, headless) {
+                Ok(()) => *last_at = Instant::now(),
+                Err(e) => run_user_log::log_full(control, format!("live-preview 跳过: {e}")),
+            }
+        }
+        Err(e) => run_user_log::log_full(control, format!("live-preview 截图跳过: {e}")),
+    }
+}
+
 /// 将完整执行日志落盘到内部目录：`executions/run-log.txt`（不对用户展示）
 fn flush_run_logs_to_disk<R: Runtime>(
     app: &AppHandle<R>,
@@ -2714,6 +2755,13 @@ async fn maybe_analyze_step_failure<R: Runtime>(
                         format!("失败截图保存失败: {e}"),
                     ),
                 }
+                let _ = session.write_live_preview(
+                    &png,
+                    idx,
+                    0,
+                    "step_fail",
+                    crate::display::resolve_headless(None),
+                );
             }
             Err(e) => {
                 run_user_log::log_full(control, format!("失败截图跳过: {e}"));

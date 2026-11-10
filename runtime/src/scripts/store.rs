@@ -332,7 +332,8 @@ pub fn get_by_name(name: &str) -> Result<Option<ScriptDef>, String> {
     Ok(list_scripts()?.into_iter().find(|s| s.name == name))
 }
 
-/// 解析「脚本」指令参数：最长脚本名匹配 + 剩余作为 ARGS
+/// 解析「脚本」指令参数：最长脚本名匹配 + 剩余作为 ARGS。
+/// 有 `corp-session.json` / `WEBCLAW_ZHJ_*` 时优先从 agent 网关拉正文，并下载关联模板。
 pub fn resolve_invocation(args: &str) -> Result<(ScriptDef, String), String> {
     let args = args.trim();
     if args.is_empty() {
@@ -347,20 +348,50 @@ pub fn resolve_invocation(args: &str) -> Result<(ScriptDef, String), String> {
             }
         }
     }
-    let script = best
-        .cloned()
-        .ok_or_else(|| {
-            let names: Vec<_> = all.iter().map(|s| s.name.as_str()).collect();
-            format!(
-                "未找到脚本「{}」。已登记: {}",
-                args.split_whitespace().next().unwrap_or(args),
-                if names.is_empty() {
-                    "（无）".into()
-                } else {
-                    names.join("、")
-                }
-            )
-        })?;
+    let local = best.cloned();
+    let name_hint = local
+        .as_ref()
+        .map(|s| s.name.clone())
+        .unwrap_or_else(|| {
+            // 无本地命中时，用首段非空 token 去云端查（支持「合并考勤数据 山西阳泉 2026-07」）
+            args.split_whitespace()
+                .next()
+                .unwrap_or(args)
+                .to_string()
+        });
+
+    if let Ok(Some(remote)) =
+        crate::zhj_remote::resolve_script_prefer_remote(local.clone(), &name_hint)
+    {
+        if args == remote.name || args.starts_with(&format!("{} ", remote.name)) {
+            let rest = args[remote.name.len()..].trim().to_string();
+            return Ok((remote, rest));
+        }
+        // 云端名与本地最长匹配不一致时，仍优先云端名（若 args 以云端名开头）
+        if args.starts_with(&remote.name) {
+            let rest = args[remote.name.len()..].trim().to_string();
+            return Ok((remote, rest));
+        }
+    }
+
+    let script = local.ok_or_else(|| {
+        let names: Vec<_> = all.iter().map(|s| s.name.as_str()).collect();
+        let hint = if crate::zhj_remote::load_corp_session().is_some() {
+            "（已尝试企业网关，仍未命中；检查脚本名 / isPublic / token）"
+        } else {
+            "（无 corp-session.json，仅查本地脚本库）"
+        };
+        format!(
+            "未找到脚本「{}」。已登记: {} {}",
+            args.split_whitespace().next().unwrap_or(args),
+            if names.is_empty() {
+                "（无）".into()
+            } else {
+                names.join("、")
+            },
+            hint
+        )
+    })?;
     let rest = args[script.name.len()..].trim().to_string();
     Ok((script, rest))
 }

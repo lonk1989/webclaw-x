@@ -12,10 +12,11 @@ from webclaw_x.fast_card import FAST_CARD
 from webclaw_x import server as gw
 
 
-def test_fast_card_is_compact_and_mentions_persist():
-    assert "常驻 MCP" in FAST_CARD or "常驻" in FAST_CARD
+def test_fast_card_is_compact_and_maps_verbs_to_run():
     assert "webclaw_run" in FAST_CARD
-    assert len(FAST_CARD) < 1200
+    assert "打开" in FAST_CARD
+    assert "accounts" in FAST_CARD.lower() or "保险箱" in FAST_CARD
+    assert len(FAST_CARD) < 1600
 
 
 def test_status_fast_shape_without_lite_spawn(monkeypatch):

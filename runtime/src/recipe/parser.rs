@@ -1174,6 +1174,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_or_group_click_cancel_probe_after_login() {
+        let _ = commands::list_commands();
+        // 常见写法：登录后试探关改密/协议弹窗；没有取消则跳过
+        let steps =
+            parse_recipe_steps("登录旧MES系统，(点击取消?)，点击人工扫保管理").unwrap();
+        assert_eq!(steps.len(), 3);
+        assert_eq!(steps[0].keyword, "登录");
+        assert!(steps[0].or_group.is_none());
+        assert!(steps[1].is_or_try());
+        assert_eq!(steps[1].keyword, "点击");
+        assert_eq!(steps[1].args, "取消");
+        assert!(steps[2].or_group.is_none());
+        assert_eq!(steps[2].args, "人工扫保管理");
+    }
+
+    #[test]
     fn skill_missing_name_errors() {
         let _ = commands::list_commands();
         let err = parse_recipe_steps("技能").unwrap_err();

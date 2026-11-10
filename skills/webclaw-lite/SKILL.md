@@ -17,8 +17,10 @@ Deterministic browser RPA driven by **Chinese natural-language recipes** stored 
 | User input | What you MUST do | Forbidden |
 |------------|------------------|-----------|
 | Pastes / attaches a **complete** recipe (many `，` steps, or `.webclaw`) | `webclaw_run` with the **entire** body / `recipePath` | Split into steps; `webclaw_probe` between steps |
-| Recipe declares **`参数…=`** (prefab placeholders) | First `webclaw_run` → `needParams` → show form → edit or「用默认」→ `paramsConfirmed=true` | Silently use placeholders; skip form |
-| User already gave business fields (e.g. 请假：年假 / 日期 / 原因) | Put them into `params` / recipe and **run immediately** | Re-ask the same table; ask「是否确认」「看下浏览器」before running |
+| Recipe declares **`参数…=`** / **`{{名}}`** | Keep declarations as-is → Host confirm / `needParams` → edit → second call `paramsConfirmed=true` + `params` | Expand defaults into recipe body; skip form; first-call `paramsConfirmed=true` |
+| Failure → patch / re-run | Reuse confirmed `params` + `paramsConfirmed=true`; Host session keeps values | Re-ask params; skip UI → blank values |
+| `(点击取消?)` / `（试探？备选）` | Keep literally (runtime probe: try / fallback-or-skip) | Strip as comments; force unconditional click |
+| User already gave business fields (e.g. 请假：年假 / 日期 / 原因) | Keep `参数…=` / `{{名}}`; put values in `params`; Host confirms then run | Inline literals then skip confirm; re-ask on retry |
 | Points at `recipes/*.webclaw` | Same as above | Probe “to be safe” |
 | New unknown site, **no** complete recipe | Authoring: `webclaw_probe` ↔ short `webclaw_run` | Invent labels; Playwright |
 | Login / EHR / 飞书 SSO | `登录EHR系统` via `webclaw_run`. Vault needs **correct SSO URL** only (`…/login?sso=lark&…`). No password. | Ask password; paste `webclaw-lite.exe accounts set`; block because `has_password=false`; invent password form |
@@ -35,13 +37,14 @@ Deterministic browser RPA driven by **Chinese natural-language recipes** stored 
 
 ## Rules
 
-1. Prefer Host tools: `webclaw_status`, `webclaw_accounts_status`, `webclaw_inspect_params`, `webclaw_probe`, `webclaw_run`, `webclaw_freeze`, `webclaw_list_recipes`, `webclaw_import`, `webclaw_human_reply`, `webclaw_cancel`
-2. **Forbidden**: Playwright / Puppeteer / CSS / invented verbs / labels not in the latest probe (authoring only)
+1. Prefer Host tools: `webclaw_status`, `webclaw_accounts_status`, `webclaw_inspect_params`, `webclaw_probe`, `webclaw_run`, `webclaw_freeze`, `webclaw_list_recipes`, `webclaw_import`, `webclaw_human_reply`, `webclaw_cancel`, `webclaw_set_display`, `webclaw_browser`
+2. **Forbidden**: Playwright / Puppeteer / CSS / invented verbs / labels not in the latest probe (authoring only); PowerShell / `taskkill` / `Stop-Process` / `kill` to manage Chrome
 3. Chat attachments are one-shot. Durable library: `webclaw_import` / `webclaw_freeze`
 4. **Install**: Windows / macOS (arm64) plugin auto-downloads lite. Intel Mac / Linux: build `runtime/` or set `binaryPath`. Gatekeeper: `xattr -d com.apple.quarantine ~/.webclaw/bin/webclaw-lite`
 5. Never turn a long user recipe into multi-round probe
 6. **参数**: Prefab defaults are placeholders — confirm or「用默认」. If the user already supplied the values in chat, merge into `params` and run; do not re-interview
 7. **Secrets / SSO**: Never ask for or accept passwords in chat. Never invent `accounts set --password`. Feishu SSO = URL only in **设置 → 网站账号**
+8. **Browser process**: Headless Chrome stays up after runs. User「关掉浏览器/关掉实例」→ `webclaw_browser(action=stop)` only — never shell-kill. `status` / `restart` via the same tool.
 
 ## Site accounts (local vault)
 
@@ -57,7 +60,7 @@ Deterministic browser RPA driven by **Chinese natural-language recipes** stored 
 
 1. Full recipe as-is → `webclaw_run`
 2. If `needParams`: show form once → wait for edit or「用默认」→ `paramsConfirmed=true` (+ `params` JSON if edited)
-3. If user already gave field values in the same turn: use them in `params` and run (still respect `needParams` gate once if the file declares 参数)
+3. If user already gave field values in the same turn: keep `参数…=` / `{{名}}` in the recipe; put values in `params` only — never expand literals into the body before Host confirm
 4. Report `ok` / `error` briefly. Do not ask the user to eyeball the browser unless the run **failed** and you need a human decision
 5. Optional `webclaw_freeze` after success
 
@@ -72,9 +75,15 @@ Deterministic browser RPA driven by **Chinese natural-language recipes** stored 
 | `参数公司=科技事业部` | Form field default/placeholder; body `{{公司}}` |
 | `登录EHR系统` | Open vault URL (SSO OK, no password in recipe) |
 | `打开https://…` | Navigate |
-| `等待文字登录10` / `等待消失加载中10` | Prefer smart wait over fixed `等待N` |
-| `等待2` | Fixed sleep (use sparingly) |
+| `等待2` / `等待5` | **Agent must only use second sleeps** after open/login/click/save |
 | `点击…` / `输入…=` | UI actions |
+
+### `等待` rules for Agent-authored recipes
+
+- **Only write duration waits**: `等待2`、`等待5`（optionally `等待3秒`）. Examples: `登录旧MES系统，等待5` · `点击保存，等待2`.
+- **Do not** write wait targets: `等待文字…`、`等待加载`、`等待遮罩`、`等待首页`、`等待登录成功`、`等待首页加载完成`、or any other status/NL phrase.
+- Why: Agent-invented wait targets rarely match real on-page text and time out; fixed seconds are predictable.
+- If a **human** frozen recipe already uses smart waits (`等待文字…` / `等待加载`…), replay it as-is — do not rewrite those steps.
 
 ## Status fields
 

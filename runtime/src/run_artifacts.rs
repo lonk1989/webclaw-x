@@ -833,6 +833,18 @@ impl RunSession {
         self.save_png_bytes(&name, png, Some(step_index))
     }
 
+    /// Overwrite live-preview.png + live-preview.json, and append a scrubber frame.
+    pub fn write_live_preview(
+        &self,
+        png: &[u8],
+        step_index: u32,
+        total: u32,
+        keyword: &str,
+        headless: bool,
+    ) -> Result<(), String> {
+        write_live_preview_at(&self.run_dir, png, step_index, total, keyword, headless)
+    }
+
     pub fn save_download_bytes(
         &self,
         filename: &str,
@@ -1385,6 +1397,109 @@ fn scan_existing_artifacts(run_dir: &Path) -> (Vec<RunArtifact>, u32) {
     // executions/ 为内部排障目录（执行日志、下载捕获），不扫入用户产物列表
     artifacts.sort_by(|a, b| a.created_at.cmp(&b.created_at));
     (artifacts, max_serial)
+}
+
+/// Overwrite `live-preview.png` + `live-preview.json` and append a scrubber frame.
+pub fn write_live_preview_at(
+    run_dir: &Path,
+    png: &[u8],
+    step_index: u32,
+    total: u32,
+    keyword: &str,
+    headless: bool,
+) -> Result<(), String> {
+    let png_path = run_dir.join("live-preview.png");
+    fs::write(&png_path, png).map_err(|e| format!("写 live-preview.png: {e}"))?;
+
+    let frame_id = append_live_frame(run_dir, png, step_index, keyword)?;
+
+    let meta = serde_json::json!({
+        "run_dir": run_dir.display().to_string(),
+        "step": step_index,
+        "total": total,
+        "keyword": keyword,
+        "headless": headless,
+        "frameId": frame_id,
+        "updatedAt": Local::now().to_rfc3339(),
+        "png": png_path.display().to_string(),
+    });
+    let json_path = run_dir.join("live-preview.json");
+    fs::write(
+        &json_path,
+        serde_json::to_string_pretty(&meta).map_err(|e| e.to_string())? + "\n",
+    )
+    .map_err(|e| format!("写 live-preview.json: {e}"))?;
+    Ok(())
+}
+
+/// Keep at most this many scrubber frames under `live-frames/` (oldest pruned).
+const LIVE_FRAME_CAP: usize = 80;
+
+/// Append one PNG under `live-frames/` and update `live-timeline.json`.
+/// Returns the new frame id (monotonic within the run).
+pub fn append_live_frame(
+    run_dir: &Path,
+    png: &[u8],
+    step_index: u32,
+    keyword: &str,
+) -> Result<u64, String> {
+    let frames_dir = run_dir.join("live-frames");
+    fs::create_dir_all(&frames_dir).map_err(|e| format!("建 live-frames: {e}"))?;
+
+    let timeline_path = run_dir.join("live-timeline.json");
+    let mut frames: Vec<Value> = if timeline_path.is_file() {
+        match fs::read_to_string(&timeline_path) {
+            Ok(raw) => serde_json::from_str::<Value>(&raw)
+                .ok()
+                .and_then(|v| v.get("frames").cloned())
+                .and_then(|f| f.as_array().cloned())
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+
+    let next_id = frames
+        .iter()
+        .filter_map(|f| f.get("id").and_then(|v| v.as_u64()))
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let file = format!("{next_id:04}.png");
+    fs::write(frames_dir.join(&file), png).map_err(|e| format!("写 live-frames/{file}: {e}"))?;
+
+    frames.push(serde_json::json!({
+        "id": next_id,
+        "file": file,
+        "step": step_index,
+        "keyword": keyword,
+        "at": Local::now().to_rfc3339(),
+    }));
+
+    while frames.len() > LIVE_FRAME_CAP {
+        if let Some(old) = frames.first() {
+            if let Some(name) = old.get("file").and_then(|v| v.as_str()) {
+                let _ = fs::remove_file(frames_dir.join(name));
+            }
+        }
+        frames.remove(0);
+    }
+
+    let timeline = serde_json::json!({
+        "frames": frames,
+        "latestId": next_id,
+        "updatedAt": Local::now().to_rfc3339(),
+    });
+    // Atomic replace so Client polls never read a half-written JSON.
+    let raw = serde_json::to_string_pretty(&timeline).map_err(|e| e.to_string())? + "\n";
+    let tmp_path = run_dir.join(format!("live-timeline.{next_id}.tmp"));
+    fs::write(&tmp_path, &raw).map_err(|e| format!("写 live-timeline tmp: {e}"))?;
+    fs::rename(&tmp_path, &timeline_path).map_err(|e| {
+        let _ = fs::remove_file(&tmp_path);
+        format!("替换 live-timeline.json: {e}")
+    })?;
+    Ok(next_id)
 }
 
 fn parse_screenshot_serial(filename: &str) -> Option<u32> {

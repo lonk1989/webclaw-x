@@ -23,7 +23,7 @@ $fragment = [ordered]@{
         PYTHONPATH = $repo
         WEBCLAW_LITE_BIN = $lite
         WEBCLAW_HOME = $homeDir
-        WEBCLAW_HEADLESS = "0"
+        WEBCLAW_HEADLESS = "1"
         WEBCLAW_TOOLS = "core"
         WEBCLAW_STATUS_MODE = "fast"
       }
@@ -39,6 +39,7 @@ Set-Content -LiteralPath (Join-Path $mcpDir "README.txt") -Value @"
 Merge cursor.mcp.json into your Host mcp.json, reconnect, and trust tools.
 Default WEBCLAW_TOOLS=core (~7 tools). Set WEBCLAW_TOOLS=all for the full catalog.
 Keep the MCP stdio session resident — do not respawn per tool call.
+Read RECIPE-VERBS.md: user phrases like 打开/点击/采集 are recipe verbs → webclaw_run once.
 Default path: Host launches lite via CLI subprocess (stable).
 Opt-in persistent serve (Windows TCP endpoint or Unix socket):
   1) start: webclaw-lite serve
@@ -47,6 +48,11 @@ Opt-in persistent serve (Windows TCP endpoint or Unix socket):
   4) unset / 0 to disable. quit serve or kill process to stop.
 Cross-process cancel/job lock is best-effort on Windows compared with POSIX.
 "@ -Encoding UTF8
+try {
+  & $py -c "from webclaw_x.recipe_verbs_doc import write_recipe_verbs_doc; from pathlib import Path; print(write_recipe_verbs_doc(Path(r'''$mcpDir''')))"
+} catch {
+  Write-Host "[mcp] RECIPE-VERBS.md skipped: $($_.Exception.Message)"
+}
 Write-Host "[mcp] wrote $out"
 Write-Host "[mcp] lite=$lite"
 Write-Host "[mcp] python=$py"

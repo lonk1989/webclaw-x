@@ -8,6 +8,10 @@ eval/out/
 **/.eval-all.lock
 *.log
 
+# --- DSH plugin (packages/webclaw) ---
+/packages/webclaw/node_modules/
+/packages/**/node_modules/
+
 # --- Rust / Cargo (monorepo runtime) ---
 /target/
 **/target/
@@ -15,3 +19,7 @@ eval/out/
 /runtime/gen/
 /runtime/resources/vc_redist.x64.exe
 /runtime/resources/DirectML.dll
+
+# local Windows packaging scratch
+/dist-windows/
+

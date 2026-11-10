@@ -110,7 +110,7 @@ if [[ "$WRITE_MCP" -eq 1 ]]; then
         "PYTHONPATH": ${REPO_J},
         "WEBCLAW_LITE_BIN": ${DEST_J},
         "WEBCLAW_HOME": ${HOME_J},
-        "WEBCLAW_HEADLESS": "0",
+        "WEBCLAW_HEADLESS": "1",
         "WEBCLAW_TOOLS": "core",
         "WEBCLAW_STATUS_MODE": "fast"
       }
@@ -129,7 +129,7 @@ JSON
         "PYTHONPATH": ${REPO_J},
         "WEBCLAW_LITE_BIN": ${DEST_J},
         "WEBCLAW_HOME": ${HOME_J},
-        "WEBCLAW_HEADLESS": "0",
+        "WEBCLAW_HEADLESS": "1",
         "WEBCLAW_TOOLS": "core",
         "WEBCLAW_STATUS_MODE": "fast"
       }
@@ -146,8 +146,12 @@ Copy one fragment into your Host MCP config, then reconnect / trust tools.
 
 Default WEBCLAW_TOOLS=core exposes ~7 tools. Set "WEBCLAW_TOOLS": "all" for the full set.
 Keep the MCP stdio session resident — do not respawn per tool call.
+Read RECIPE-VERBS.md: 打开/点击/采集 are recipe verbs → webclaw_run once.
 macOS Gatekeeper: xattr -d com.apple.quarantine "$DEST"
 TXT
+  "$PY" -c "from webclaw_x.recipe_verbs_doc import write_recipe_verbs_doc; from pathlib import Path; print(write_recipe_verbs_doc(Path(r'''$MCP_DIR''')))" 2>/dev/null \
+    || PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}" "$PY" -c "from webclaw_x.recipe_verbs_doc import write_recipe_verbs_doc; from pathlib import Path; print(write_recipe_verbs_doc(Path(r'''$MCP_DIR''')))" 2>/dev/null \
+    || true
   echo "[install] wrote MCP fragments → $MCP_DIR/"
 fi
 
@@ -162,8 +166,7 @@ else
 {
   "enabled": false,
   "allow_localhost": true,
-  "allowed_hosts": [],
-  "_comment": "Default off for public install. Set enabled:true + allowed_hosts to opt in."
+  "allowed_hosts": []
 }
 EOF
   echo "[install] policy OFF → $POLICY_PATH"
@@ -173,5 +176,6 @@ echo
 echo "[install] done."
 echo "  lite:  $DEST"
 echo "  python:$PY"
-echo "  next:  copy $MCP_DIR/*.mcp.json → Host, reconnect, then Skill: skills/SKILL.md"
+echo "  verbs: $MCP_DIR/RECIPE-VERBS.md"
+echo "  next:  copy $MCP_DIR/*.mcp.json → Host, reconnect; try「打开 https://example.com，等待2，采集」"
 echo "  cargo: only if you edit runtime/ — ./scripts/build_runtime.sh (creates large target/)"

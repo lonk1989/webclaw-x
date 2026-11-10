@@ -68,11 +68,22 @@ try:
 except Exception:  # noqa: BLE001 — startup must not fail on probe
     pass
 
+# Keep a human/agent-readable verb cookbook next to mcp fragments.
+try:
+    from webclaw_x.recipe_verbs_doc import write_recipe_verbs_doc  # noqa: E402
+
+    write_recipe_verbs_doc(HOME / "mcp")
+except Exception:  # noqa: BLE001
+    pass
+
 
 def _env() -> dict[str, str]:
     env = os.environ.copy()
     env["WEBCLAW_HOME"] = str(HOME)
     env["WEBCLAW_LITE"] = "1"
+    # Product default: headless unless caller already set WEBCLAW_HEADLESS.
+    if not str(env.get("WEBCLAW_HEADLESS") or "").strip():
+        env["WEBCLAW_HEADLESS"] = "1"
     return env
 
 
@@ -504,8 +515,14 @@ async def webclaw_run(
     dualwrite_tables: bool = True,
     recipe_ref: str = "",
     environment: str = "",
+    headless: bool | None = None,
 ) -> dict:
-    """Execute a recipe ONCE (zh/en verbs; same AST). Prefer full body; never split frozen recipes into probe steps.
+    """PRIMARY: execute a Chinese/English recipe ONCE (same AST).
+
+    User phrases 打开/点击/输入/等待/采集/登录 are recipe VERBS — put them in `recipe`
+    (e.g. recipe="打开旧MES系统" or "打开https://a.com，等待2，采集表格"). Do NOT stop
+    after accounts_list. NEVER open URLs via Start-Process / default browser / open /
+    xdg-open. Prefer full body; never split frozen recipes into probe steps.
 
     To stop, Host agents must call webclaw_cancel (allowed concurrently during this run),
     not merely stop the chat/LLM response.
@@ -517,6 +534,7 @@ async def webclaw_run(
     dualwrite_tables: after success, parse documents/*.md tables → .json/.csv.
     recipe_ref: versioned name@version (or latest name), exclusive with recipe/recipe_path.
     environment: shared non-secret environment binding for recipe_ref, e.g. fixture.
+    headless: optional one-shot override (true=无头, false=有头窗口); omit to use display.json / default.
     """
     resolved_version = None
     if environment and not recipe_ref:
@@ -565,6 +583,10 @@ async def webclaw_run(
     if params.strip():
         # Scrub before forwarding? Still pass to binary but never echo secrets back.
         args += ["--params", params.strip()]
+    if headless is True:
+        args += ["--headless"]
+    elif headless is False:
+        args += ["--headed"]
     pending = _params_gate(recipe, params_confirmed)
     if pending:
         return pending
@@ -583,6 +605,10 @@ async def webclaw_run(
             }
             if params.strip():
                 extra["params"] = params.strip()
+            if headless is True:
+                extra["headless"] = True
+            elif headless is False:
+                extra["headless"] = False
             resp = lite_serve_call("run", timeout=float(RUN_TIMEOUT), **extra)
             if resp is not None:
                 if resp.get("error_code") == "RUN_BUSY":
@@ -771,6 +797,19 @@ async def webclaw_human_reply(mode: str, text: str = "", run_id: str = "", promp
 
 
 @mcp.tool()
+def webclaw_set_display(headless: bool) -> dict:
+    """Persist Chrome display mode for later runs (default is headless / no popup window).
+
+    User says「改成有头 / 弹出浏览器」→ headless=false.
+    User says「改成无头 / 不要弹窗」→ headless=true.
+    Writes $WEBCLAW_HOME/display.json. Next webclaw_run applies it (may recycle Chrome).
+    """
+    args = ["display", "--headless", "1" if headless else "0"]
+    r = _run(args, timeout=15)
+    return _finalize(r)
+
+
+@mcp.tool()
 async def webclaw_cancel(run_id: str = "") -> dict:
     """Stop the managed child (and its cancel marker). Idle cancel is a no-op.
 
@@ -836,7 +875,11 @@ def webclaw_last_log(lines: int = 80) -> dict:
 
 @mcp.tool()
 def webclaw_accounts_list() -> dict:
-    """List site accounts in the local vault (passwords never returned)."""
+    """LOOKUP ONLY: list vault sites (id/name/url/username/has_password — never passwords).
+
+    Does NOT open a browser. After finding a site (e.g. 旧MES), still call webclaw_run
+    with a verb recipe like 打开旧MES系统 / 登录旧MES系统.
+    """
     r = _run(["accounts", "list"], timeout=30)
     return _finalize(r)
 

@@ -139,7 +139,7 @@ pub async fn run_command<R: Runtime>(
     // 「等待」纯秒数：Rust sleep，不依赖页内 JS / Chrome（即使 runner 是 JavaScript）
     if cmd.keyword == "等待" {
         if let Some(secs) = wait_pure_sleep_secs(args) {
-            return run_wait(&secs, cancel).await;
+            return run_wait(&secs, cancel, client.as_deref_mut(), session).await;
         }
         if wait_args_browser_free("等待", args) && args.trim().starts_with("下载") {
             let timeout = wait_timeout_secs_hint(args);
@@ -177,7 +177,7 @@ pub async fn run_command<R: Runtime>(
             )
             .await
         }
-        RunnerKind::RustWait => run_wait(args, cancel).await,
+        RunnerKind::RustWait => run_wait(args, cancel, client.as_deref_mut(), session).await,
         RunnerKind::RustReload => {
             run_reload(
                 client.ok_or_else(|| "「刷新」需要浏览器".to_string())?,
@@ -346,6 +346,8 @@ async fn run_named_script<R: Runtime>(
     ctx: &Option<CommandContext<'_, R>>,
 ) -> Result<String, String> {
     let (script, script_args) = crate::scripts::resolve_invocation(args)?;
+    // 执行前再确保关联模板（resolve 已尽力拉取；此处补漏）
+    let _ = crate::zhj_remote::ensure_templates_for_script(&script.name);
     let on_print = ctx.as_ref().and_then(|c| c.on_print.clone());
     let cancel = ctx.as_ref().and_then(|c| c.cancel.clone());
     let app = ctx.as_ref().and_then(|c| c.app.cloned());
@@ -825,7 +827,12 @@ fn wait_pure_sleep_secs(args: &str) -> Option<String> {
     Some(s.to_string())
 }
 
-async fn run_wait(args: &str, cancel: Option<&AtomicBool>) -> Result<String, String> {
+async fn run_wait(
+    args: &str,
+    cancel: Option<&AtomicBool>,
+    client: Option<&mut CdpClient>,
+    session: Option<&Arc<RunSession>>,
+) -> Result<String, String> {
     let s = strip_wait_tail_punct(
         args.trim()
             .trim_end_matches('秒')
@@ -837,7 +844,15 @@ async fn run_wait(args: &str, cancel: Option<&AtomicBool>) -> Result<String, Str
     if !n.is_finite() || n < 0.0 {
         return Err(format!("等待秒数无效: {args}"));
     }
-    sleep_cancellable(Duration::from_secs_f64(n), cancel).await?;
+    let dur = Duration::from_secs_f64(n);
+    // With a browser + run dir: heartbeat screenshots during the wait.
+    if let (Some(c), Some(s)) = (client, session) {
+        let mut preview = crate::live_wait_preview::LiveWaitPreview::new("等待")
+            .with_run_dir(s.run_dir.clone());
+        preview.sleep_tick(dur, cancel, Some(c)).await?;
+    } else {
+        sleep_cancellable(dur, cancel).await?;
+    }
     Ok(format!("已等待 {n} 秒"))
 }
 
@@ -877,8 +892,13 @@ async fn run_human_assist<R: Runtime>(
         };
         bridge.write_request(&req, None)?;
         crate::run_sink::emit_log(format!("人机验证：{hint}"));
+        let mut preview = crate::live_wait_preview::LiveWaitPreview::new("等待");
         match bridge
-            .wait_reply(cancel, std::time::Duration::from_secs(timeout_secs.clamp(10, 3600)))
+            .wait_reply_ticking(
+                cancel,
+                std::time::Duration::from_secs(timeout_secs.clamp(10, 3600)),
+                Some((client, &mut preview)),
+            )
             .await?
         {
             crate::human_bridge::HumanReply::Cancelled => return Err("已取消人机验证".into()),
@@ -1646,7 +1666,7 @@ async fn run_js_only<R: Runtime>(
     if let Some(d) = v.get("delegate").and_then(|x| x.as_str()) {
         return match d {
             "rust_open" => run_open(client, args, cancel, ctx.as_ref()).await,
-            "rust_wait" => run_wait(args, cancel).await,
+            "rust_wait" => run_wait(args, cancel, Some(client), session).await,
             "rust_new_tab" => run_new_tab(client, args, session, cancel, ctx.as_ref()).await,
             "rust_close_tab" => run_close_tab(client, cancel).await,
             "rust_screenshot" => run_screenshot(client, session, step_index, args).await,
@@ -2089,7 +2109,7 @@ async fn run_wait_download_files_only<R: Runtime>(
     let timeout_secs = v
         .get("timeoutSecs")
         .and_then(|x| x.as_u64())
-        .unwrap_or(200)
+        .unwrap_or(30)
         .max(1);
     let base_msg = v
         .get("message")
@@ -2118,7 +2138,7 @@ async fn run_wait_download_files_only<R: Runtime>(
 }
 
 async fn run_wait_download<R: Runtime>(
-    client: &CdpClient,
+    client: &mut CdpClient,
     v: &Value,
     session: Option<&Arc<RunSession>>,
     ctx: Option<CommandContext<'_, R>>,
@@ -2126,7 +2146,7 @@ async fn run_wait_download<R: Runtime>(
     let timeout_secs = v
         .get("timeoutSecs")
         .and_then(|x| x.as_u64())
-        .unwrap_or(200)
+        .unwrap_or(30)
         .max(1);
     let base_msg = v
         .get("message")
@@ -2149,6 +2169,8 @@ async fn run_wait_download<R: Runtime>(
     session.set_auto_fetch_armed(true);
     session.append_download_trace("「等待下载」开始：已武装自动落盘");
     let _fetch_guard = client_download::AutoFetchWaitGuard::enter(session);
+    let mut preview = crate::live_wait_preview::LiveWaitPreview::new("下载")
+        .with_run_dir(session.run_dir.clone());
 
     let _ = crate::browser_network::BrowserNetworkCapture::shared_for_port(client.port).await;
     let _ = client_download::ensure_automation_capture(client).await;
@@ -2163,6 +2185,7 @@ async fn run_wait_download<R: Runtime>(
     let mut last_fetch_err: Option<String> = None;
 
     while Instant::now() < until {
+        let _ = preview.tick(client).await;
         if cancel.is_some_and(|f| f.load(Ordering::SeqCst)) {
             if let Some(p) = progress.as_ref() {
                 p.hide();
@@ -3909,7 +3932,8 @@ fn strip_wait_tail_punct(s: &str) -> &str {
 /// 从「等待」参数提取超时秒数，供 CDP Runtime.evaluate 预算（须 ≥ 页内脚本轮询）。
 fn wait_timeout_secs_hint(args: &str) -> u64 {
     const DEFAULT: u64 = 30;
-    const DOWNLOAD_DEFAULT: u64 = 200;
+    /// Bare「等待下载」CDP budget; explicit「等待下载200」still uses 200.
+    const DOWNLOAD_DEFAULT: u64 = 30;
     let s = strip_wait_tail_punct(args.trim().trim_end_matches('秒').trim());
     if s.is_empty() {
         return DEFAULT;

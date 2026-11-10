@@ -1,51 +1,22 @@
-# 定位冲突（AMBIGUOUS_TARGET）设计补丁
+# 定位冲突（点击文字 `#N`）
 
-## 现状（upstream webclaw-oss）
-
-- `parse_click_text_args("确定")` → `(query="确定", match_index=1)`  
-  无 `#N` 时**默认 1**，静默点得分最高的第一个。
-- `locate_global_click_text_once` 按排名取 `entries[global_index-1]`，不区分「用户显式 #1」与「默认」。
-- 上传附件路径已有「无序号 = 须唯一」语义（`index == 0`），点击文字尚未对齐。
-
-## 目标行为
+## 现行语义（点击文字）
 
 | 菜谱写法 | 候选数 | 行为 |
 |----------|--------|------|
 | `点击确定` | 0 | 失败：未找到 |
-| `点击确定` | 1 | 点击该唯一候选 |
-| `点击确定` | ≥2 | **拒绝静默点击**，返回 `AMBIGUOUS_TARGET` + 候选列表（text/frame/score/#N） |
-| `点击确定#2` | ≥2 | 显式序号，点第 2 个（保持现行为） |
+| `点击确定` | ≥1 | **无 `#N` 默认 `#1`**，点排名最高的第一个 |
+| `点击确定#2` | ≥2 | 显式序号，点第 2 个 |
 
-## 建议改动点（Rust）
+- `parse_click_text_args("确定")` → `(query="确定", match_index=1)`
+- `locate_global_click_text_once` 按排名取 `entries[global_index-1]`
+- 多候选时成功日志会注明「共 N 个匹配，当前 #1；其它写 点击…#N」，**不**因歧义失败
 
-1. `commands/scripts.rs` `parse_click_text_args`  
-   - 无 `#N` → `match_index = 0`（须唯一）；有 `#N` → 显式序号。  
-2. `commands/frame_eval.rs` `locate_global_click_text_once`  
-   - `global_index == 0`：`entries.len()==1` 用之；`>1` 返回错误字符串含 `AMBIGUOUS_TARGET` 与候选摘要。  
-3. JS `compose_click_script` 内同逻辑（防非 fan-out 路径漏网）。  
-4. MCP 网关已能用正则把「共 N 个足够匹配」等映射为 `code=AMBIGUOUS_TARGET`。
+> 上传附件路径仍是「无序号 = 须唯一」；与点击文字不同。
 
-## 本仓产物
+## 历史备注
 
-- 补丁说明：`patches/0001-ambiguous-click-refuse-silent.md`  
-- 试验性 diff：`patches/0001-ambiguous-click-refuse-silent.patch`（对 oss 树）  
-- 验收：`tests/test_l1_contract.py::test_v03_ambiguous_target`（patch 前 xfail）
+曾试验过「无 `#N` 且候选 ≥2 → `AMBIGUOUS_TARGET` 拒绝静默点击」（webclaw-x P0）。  
+已回退：与最初设计一致——**不写序号即为默认 `#1`**。Agent 不必为默认第一项补 `#1`；只有要选非第一项时才写 `#N`。
 
-## 风险
-
-- 旧菜谱依赖「多个确定时点第一个」会开始失败 → 需改成 `#1` 或收紧文案。  
-- 属**有意破坏性**改进，应在 CHANGELOG / Skill 中写明。
-
-
-## 落地状态（2026-11-08 Asia/Shanghai）
-
-已在 webclaw-oss 运行时落地：`parse_click_text_args` 默认 index=0；`locate_global_click_text_once` 多候选返回 `AMBIGUOUS_TARGET`；L1 `test_v03_ambiguous_target` 绿。
-
-## 候选可读性（2026-11-08 Asia/Shanghai）
-
-豆包 L3：`AMBIGUOUS_TARGET` 可用，但候选只有相同 CDP `target=`，人/Host 无法辨认 A/B/C。
-
-已改：
-- lite `compose_click_text_catalog` 附带 `tag/text/context/x/y/clickable`
-- 错误文案形如 `#1 button「确定」旁「对话框 A」主文档@(120,80) 硬可点`
-- MCP `ambiguous.candidate_count` + `candidates[].label`；hint 改为「同文案后加 #N（例如 点击确定#1）」
+`AMBIGUOUS_TARGET` 错误码与 MCP 解析仍保留（上传多文件等路径、以及旧日志兼容）。

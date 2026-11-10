@@ -27,7 +27,7 @@ def test_policy_draft_normalizes_hosts():
     assert d["enabled"] is True
     assert d["allow_localhost"] is True
     assert d["allowed_hosts"] == ["login.example.com", "app.example.com"]
-    assert "_comment" in d
+    assert "_comment" not in d
 
 
 def test_policy_draft_cli(tmp_path):
@@ -101,8 +101,9 @@ def test_readme_precompiled_default():
     assert readme.find("install_webclaw.sh") < cargo_idx
 
 
-def test_fast_card_mentions_core7_and_profile():
+def test_fast_card_mentions_core7_and_verb_cookbook():
     from webclaw_x.fast_card import FAST_CARD
     assert "core7" in FAST_CARD or "核心工具" in FAST_CARD
-    assert "WEBCLAW_TOOLS" in FAST_CARD
-    assert "RECYCLE" in FAST_CARD or "复用" in FAST_CARD
+    assert "RECIPE-VERBS" in FAST_CARD or "recipe-verbs" in FAST_CARD
+    assert "webclaw_run" in FAST_CARD
+    assert "采集" in FAST_CARD

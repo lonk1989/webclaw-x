@@ -1,6 +1,6 @@
 name: release
 
-# Ported from lonk1989/webclaw-oss (.github/workflows/release.yml), adapted for
+# webclaw-x Release workflow (historically adapted from abandoned webclaw-oss), for
 # webclaw-x monorepo (workspace root) and Linux x64 asset. No npm publish.
 #
 # Trigger: push tag v*  OR  Actions → release → Run workflow (attach to a tag).

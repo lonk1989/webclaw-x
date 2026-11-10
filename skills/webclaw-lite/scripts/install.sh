@@ -16,7 +16,7 @@ case "$OS-$ARCH" in
 esac
 
 # Flat Release layout: …/download/<asset> (not …/release/<asset>).
-DEFAULT_BASE="https://github.com/lonk1989/webclaw-oss/releases/latest/download"
+DEFAULT_BASE="https://github.com/lonk1989/webclaw-x/releases/latest/download"
 BASE="${WEBCLAW_LITE_BASE:-$DEFAULT_BASE}"
 BASE="${BASE%/}"
 URL="${WEBCLAW_WORKER_URL:-$BASE/$FILE}"

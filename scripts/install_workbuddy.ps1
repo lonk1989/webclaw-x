@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
   End-user one-click install for WorkBuddy / Cursor (Windows x64).
@@ -16,7 +16,7 @@
   Fallback: GitHub Releases (then optional ghfast mirrors).
 
   Optional env / params:
-    WEBCLAW_VERSION / -Version   tag without v (default 0.2.1; "latest" allowed)
+    WEBCLAW_VERSION / -Version   tag without v (default 0.2.2; "latest" allowed)
     WEBCLAW_HOME                 install root (default %LOCALAPPDATA%\webclaw)
     WEBCLAW_HOSTS / -Hosts       draft policy hosts (comma-separated)
     WEBCLAW_NO_MERGE=1 / -NoMerge  skip writing WorkBuddy/Cursor mcp.json
@@ -25,7 +25,7 @@
 #>
 [CmdletBinding()]
 param(
-  [string]$Version = $(if ($env:WEBCLAW_VERSION) { $env:WEBCLAW_VERSION } else { "0.2.1" }),
+  [string]$Version = $(if ($env:WEBCLAW_VERSION) { $env:WEBCLAW_VERSION } else { "0.2.2" }),
   [string]$Hosts = $(if ($env:WEBCLAW_HOSTS) { $env:WEBCLAW_HOSTS } else { "" }),
   [switch]$NoMerge = ($env:WEBCLAW_NO_MERGE -eq "1")
 )
@@ -62,7 +62,7 @@ function Get-OssDir {
       if ($j.version) { return "$DefaultOssRoot/v$([string]$j.version.TrimStart('v'))" }
     }
   } catch { }
-  return "$DefaultOssRoot/v0.2.1"
+  return "$DefaultOssRoot/v0.2.2"
 }
 
 function Get-ReleaseDirUrls {
@@ -243,7 +243,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 [project]
 name = "webclaw-x"
-version = "0.2.1"
+version = "0.2.2"
 requires-python = ">=3.10"
 dependencies = ["mcp>=1.0,<2.0", "anyio>=4.0"]
 [tool.setuptools.packages.find]
@@ -275,7 +275,7 @@ $serverEntry = [ordered]@{
   env = [ordered]@{
     WEBCLAW_LITE_BIN = $LiteDest
     WEBCLAW_HOME = $HomeDir
-    WEBCLAW_HEADLESS = "0"
+    WEBCLAW_HEADLESS = "1"
     WEBCLAW_TOOLS = "core"
     WEBCLAW_STATUS_MODE = "fast"
   }
@@ -311,16 +311,18 @@ print(path)
 "@
   Write-Step "policy ON with hosts → $policyPath"
 } else {
-  $policyOff = @{ enabled = $false; allow_localhost = $true; allowed_hosts = @(); _comment = 'Default off for public install. Set enabled:true + allowed_hosts to opt in.' }
+  # Only schema fields — lite uses deny_unknown_fields; a stray `_comment` becomes POLICY_DENIED: invalid policy.json
+  $policyOff = @{ enabled = $false; allow_localhost = $true; allowed_hosts = @() }
   ($policyOff | ConvertTo-Json -Depth 5) + "`n" | Set-Content -LiteralPath $policyPath -Encoding UTF8
   Write-Step "policy OFF → $policyPath"
 }
 
-# --- 5) quiet Host-vault probe (fengxing/WorkBuddy export drops) ---
+# --- 5) verb cookbook + quiet Host-vault probe ---
 try {
+  & $Py -c "from webclaw_x.recipe_verbs_doc import write_recipe_verbs_doc; from pathlib import Path; print(write_recipe_verbs_doc(Path(r'''$HomeDir''')/'mcp'))"
   & $Py -c "from webclaw_x.host_vault_probe import maybe_probe_on_startup; r=maybe_probe_on_startup(webclaw_home=r'''$HomeDir''', lite_bin=r'''$LiteDest'''); print(r.as_dict() if r else 'skipped')"
 } catch {
-  Write-Host "[webclaw-x] host-vault probe skipped: $($_.Exception.Message)" -ForegroundColor DarkYellow
+  Write-Host "[webclaw-x] post-install helper skipped: $($_.Exception.Message)" -ForegroundColor DarkYellow
 }
 
 Write-Host ""
@@ -330,7 +332,8 @@ Write-Host "  host:  $Py -m webclaw_x.server"
 Write-Host "  home:  $HomeDir"
 Write-Host "下一步："
 Write-Host "  1) 打开 WorkBuddy → 插件/MCP，确认 webclaw-x 绿灯（或重启 WorkBuddy）"
-Write-Host "  2) 对话里说：用 webclaw 查一下 status"
-Write-Host "  3) 用户说明：https://github.com/lonk1989/webclaw-x/blob/main/docs/workbuddy-quickstart.md"
+Write-Host "  2) 对话试：打开 https://example.com，等待2，采集（或「用 webclaw 查一下 status」）"
+Write-Host "  3) 用户说明：https://github.com/lonk1989/webclaw-x/blob/main/docs/workbuddy-quickstart.md · 动词表 docs/recipe-verbs.md"
 Write-Host "  导航白名单默认关闭；需要时写 $HomeDir\policy.json 设 enabled:true + allowed_hosts"
 Write-Host "  站点账号：写入 $HomeDir\host-exports\workbuddy.json（见 docs/host-vault-export.md）"
+Write-Host "  动词说明书：$HomeDir\mcp\RECIPE-VERBS.md（打开/点击/采集 → webclaw_run）"

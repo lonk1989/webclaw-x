@@ -11,6 +11,9 @@ pub enum RunEvent {
     RunStart {
         run_id: String,
         title: String,
+        /// Absolute run artifact directory — emitted at start so Host can focus live UI
+        /// before need_human / done (otherwise sidebar lags until captcha/end).
+        run_dir: String,
     },
     StepStart {
         index: u32,
@@ -161,22 +164,45 @@ pub fn emit_log(message: impl Into<String>) {
     });
 }
 
-/// 轻客户端 stdout 只留给步骤与人机事件。内存采样、探针仍写入 run 目录日志文件。
+/// 轻客户端 stdout 只留给真实步骤 / 人机事件。状态前言、内存采样仍写入 run 目录。
 fn lite_stdout_skips_log(message: &str) -> bool {
     if std::env::var_os("WEBCLAW_VERBOSE").is_some() {
         return false;
     }
-    if std::env::var_os("WEBCLAW_LITE").is_none() {
+    if std::env::var_os("WEBCLAW_LITE").is_none() && !worker_mode() {
         return false;
     }
-    message.contains("内存")
-        || message.contains("working set")
-        || message.contains("WorkingSet")
-        || message.contains("定时 #")
-        || message.contains("探针")
-        || message.contains("UA内存")
-        || message.contains("taskkill")
-        || message.contains("已启用浏览器内存")
+    let m = message.trim_start();
+    // Keep step markers / outcomes / HITL; drop session preamble & chrome chatter.
+    if m.starts_with("── 步骤")
+        || m.starts_with("步骤 ")
+        || m.starts_with("登录成功")
+        || m.starts_with("验证码")
+        || m.contains("NEED_HUMAN")
+        || m.contains("need_human")
+    {
+        return false;
+    }
+    m.starts_with("run_dir=")
+        || m.starts_with("════")
+        || m.starts_with("继续任务：")
+        || m.starts_with("新任务：")
+        || m.starts_with("CDP 已连接")
+        || m.starts_with("已启用下载")
+        || m.starts_with("已启用浏览器内存")
+        || m.starts_with("下载截获")
+        || m.starts_with("浏览器内存")
+        || m.starts_with("伙伴浏览器")
+        || m.starts_with("产物已与对话绑定")
+        || m.starts_with("任务浏览器：")
+        || m.starts_with("live-preview")
+        || m.contains("内存")
+        || m.contains("working set")
+        || m.contains("WorkingSet")
+        || m.contains("定时 #")
+        || m.contains("探针")
+        || m.contains("UA内存")
+        || m.contains("taskkill")
 }
 
 /// Current runtime errors carry explicit ASCII prefixes at their origin.

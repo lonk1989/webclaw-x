@@ -104,8 +104,10 @@ pub async fn ensure_worker_chrome(
     let port = worker_cdp_port();
     let profile = ChromeInstance::profile_for_task(task_id);
     if is_debug_port_ready_on(port).await {
-        // 默认复用健康 CDP（含 lite 默认 resume）。WEBCLAW_CHROME_RECYCLE=1 强制杀再启。
-        if chrome_recycle_requested() {
+        // 默认复用健康 CDP（含 lite 默认 resume）。
+        // WEBCLAW_CHROME_RECYCLE=1 或有头/无头切换后强制杀再启。
+        let mode_recycle = crate::display::take_mode_change_recycle();
+        if chrome_recycle_requested() || mode_recycle {
             crate::browser_network::drop_port_capture(port);
             let before = find_listener_pid(port);
             kill_listeners_on_port(port);
@@ -131,6 +133,8 @@ pub async fn ensure_worker_chrome(
             return Ok((port, true, reuse_ready_message(resume, port, n, &url)));
         }
     }
+    // Fresh launch already uses the requested mode; drop a stale mode-change flag.
+    let _ = crate::display::take_mode_change_recycle();
     let _child = launch_debug_chrome_on(&profile, port, headless)?;
     wait_for_debug_port_on(port, 25).await?;
     let pages = list_page_targets_on(port).await.unwrap_or_default();

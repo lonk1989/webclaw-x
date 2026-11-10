@@ -139,8 +139,9 @@ def test_policy_ambiguity_and_actions_are_not_retried(healing,heal_site):
     config(short_retries=3,refresh=True,hitl=True)
     denied=as_envelope(asyncio.run(gw.webclaw_run(recipe='打开https://not-allowed.invalid')))
     assert denied['code']=='POLICY_DENIED' and not denied.get('heal_trace')
+    # Bare click defaults to #1 — succeeds, must not enter heal.
     ambiguous=as_envelope(asyncio.run(gw.webclaw_run(recipe=f'打开{base}/ambiguous.html，点击确定')))
-    assert ambiguous['code']=='AMBIGUOUS_TARGET' and not ambiguous.get('heal_trace')
+    assert ambiguous.get('ok') and not ambiguous.get('heal_trace'), ambiguous
     action=as_envelope(asyncio.run(gw.webclaw_run(recipe=f'打开{base}/selfheal.html，选择下拉 missing')))
     assert action['code']=='NEED_REPAIR',action
     assert stages(action)==['need_repair_unsafe_or_nontransient']

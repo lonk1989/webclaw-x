@@ -16,7 +16,8 @@
 - 一键安装会写入 `policy.json` 且 `enabled: false`；传 `WEBCLAW_HOSTS` / `--hosts` 时改为开启并填入名单。
 - 开启后：精确 host 匹配，大小写/尾点规范化；不支持通配符。`example.com` **不**放行子域。
 - 开启后仍拒绝 URL 用户名/密码，以及 `file:` / `data:` / `javascript:`（`about:blank` 与 localhost 按 `allow_localhost`）。
-- 显式文件存在但损坏 / 未知字段：fail-closed，`POLICY_DENIED`。
+- 显式文件存在但损坏 / 未知字段：fail-closed，`POLICY_DENIED: invalid policy.json`。  
+  正式 `policy.json` 只写 `enabled` / `allow_localhost` / `allowed_hosts`（勿塞 README 注释键；旧版 lite 对未知字段直接判废，连 `enabled:false` 也会拦导航）。
 - 每次导航重读配置；无需重启。
 - `打开` / `open` / `打开标签` / `probe --url` 走导航校验；直接 CLI 同样生效。
 - 环境开关：`WEBCLAW_POLICY_ENABLED=0` 强制关闭；**不要**根据页面内容自动开关。

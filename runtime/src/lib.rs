@@ -22,11 +22,13 @@ mod feishu_relay;
 #[cfg(feature = "desktop")]
 mod file_assoc;
 mod human_bridge;
+mod display;
 mod navigation_policy;
 mod self_heal;
 #[cfg(feature = "desktop")]
 mod launch;
 mod login_verify;
+mod live_wait_preview;
 mod host_agent;
 mod page_recovery;
 mod page_probe;
@@ -47,6 +49,7 @@ mod run_relay_desktop;
 mod run_sink;
 mod run_user_log;
 mod scripts;
+mod zhj_remote;
 #[cfg(feature = "desktop")]
 mod scheduler;
 #[cfg(feature = "desktop")]

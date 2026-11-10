@@ -106,6 +106,19 @@ impl FileHumanBridge {
         cancel: &AtomicBool,
         timeout: Duration,
     ) -> Result<HumanReply, String> {
+        self.wait_reply_ticking(cancel, timeout, None).await
+    }
+
+    /// Same as `wait_reply`, optionally refreshing live preview while waiting.
+    pub async fn wait_reply_ticking(
+        &self,
+        cancel: &AtomicBool,
+        timeout: Duration,
+        mut live: Option<(
+            &mut crate::cdp::CdpClient,
+            &mut crate::live_wait_preview::LiveWaitPreview,
+        )>,
+    ) -> Result<HumanReply, String> {
         let deadline = Instant::now() + timeout;
         loop {
             if cancel.load(Ordering::SeqCst) {
@@ -121,6 +134,9 @@ impl FileHumanBridge {
                 let _ = std::fs::remove_file(self.dir.join("human_reply.txt"));
                 let _ = std::fs::remove_file(self.dir.join("human_reply.json"));
                 return Ok(r);
+            }
+            if let Some((client, preview)) = live.as_mut() {
+                let _ = preview.tick(client).await;
             }
             tokio::time::sleep(Duration::from_millis(300)).await;
         }

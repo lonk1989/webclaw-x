@@ -40,6 +40,7 @@ Stdout is a single JSON object (`"type":"probe"`) with `candidates[]` (`textCmd`
 | `WEBCLAW_CHROME` | Auto-detect |
 | `WEBCLAW_CDP_PORT` | `19222` |
 | `WEBCLAW_RESUME_BROWSER` | `1` under lite |
-| `WEBCLAW_HEADLESS` | unset = visible window |
+| `WEBCLAW_HEADLESS` | unset → `display.json` → **default headless** (`1`); `0`/`false`/`off` = headed window |
+| `webclaw-lite display` | `display [--headless 0\|1] [--headed]` — persist preference in `$WEBCLAW_HOME/display.json` |
 | `WEBCLAW_LITE_BASE` | empty (no default CDN) |
 | `WEBCLAW_WORKER_URL` | full download URL for update |

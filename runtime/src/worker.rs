@@ -145,6 +145,12 @@ fn parse_cli(args: &[String]) -> Result<CliArgs, String> {
                         params = parse_params_json(raw)?;
                     }
                     "--stdin" => stdin = true,
+                    "--headless" => {
+                        crate::display::apply_cli_headless_flag(true);
+                    }
+                    "--headed" => {
+                        crate::display::apply_cli_headless_flag(false);
+                    }
                     "-h" | "--help" => {
                         print_usage();
                         return Err("help".into());

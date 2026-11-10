@@ -62,7 +62,7 @@ pub fn default_commands() -> Vec<CommandDef> {
             kind: CommandKind::Script,
             runner: RunnerKind::JavaScript,
             builtin: true,
-            description: "智能等待：2 | 文字登录10 | 下载（默认同步到新文件落盘，超时200）".into(),
+            description: "智能等待：2 | 加载10 | 遮罩 | 文字登录10 | 下载（默认同步到新文件落盘，超时200）；勿写「首页加载完成」等状态句".into(),
             script: scripts::compose_script(scripts::WAIT_PAGE),
             macro_body: String::new(),
             updated_at: now,

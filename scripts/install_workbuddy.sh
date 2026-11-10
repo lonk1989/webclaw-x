@@ -5,7 +5,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/lonk1989/webclaw-x/main/scripts/install_workbuddy.sh | bash
 #
 # Env:
-#   WEBCLAW_VERSION=0.2.1|latest
+#   WEBCLAW_VERSION=0.2.2|latest
 #   WEBCLAW_HOME=~/.webclaw
 #   WEBCLAW_HOSTS=app.example.com,login.example.com
 #   WEBCLAW_NO_MERGE=1
@@ -15,7 +15,7 @@
 set -euo pipefail
 
 REPO="lonk1989/webclaw-x"
-VERSION="${WEBCLAW_VERSION:-0.2.1}"
+VERSION="${WEBCLAW_VERSION:-0.2.2}"
 VER="${VERSION#v}"
 if [ "$VER" = "latest" ]; then
   TAG="latest"
@@ -74,7 +74,7 @@ oss_dir() {
       return 0
     fi
   fi
-  echo "$DEFAULT_OSS_ROOT/v0.2.1"
+  echo "$DEFAULT_OSS_ROOT/v0.2.2"
 }
 
 # Try URL list; write to dest on first success.
@@ -150,7 +150,7 @@ entry = {
     "env": {
         "WEBCLAW_LITE_BIN": str(lite),
         "WEBCLAW_HOME": str(home),
-        "WEBCLAW_HEADLESS": "0",
+        "WEBCLAW_HEADLESS": "1",
         "WEBCLAW_TOOLS": "core",
         "WEBCLAW_STATUS_MODE": "fast",
     },
@@ -238,7 +238,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 [project]
 name = "webclaw-x"
-version = "0.2.1"
+version = "0.2.2"
 requires-python = ">=3.10"
 dependencies = ["mcp>=1.0,<2.0", "anyio>=4.0"]
 [tool.setuptools.packages.find]
@@ -285,7 +285,7 @@ cat > "$MCP_DIR/workbuddy.mcp.json" <<JSON
       "env": {
         "WEBCLAW_LITE_BIN": ${LITE_J},
         "WEBCLAW_HOME": ${HOME_J},
-        "WEBCLAW_HEADLESS": "0",
+        "WEBCLAW_HEADLESS": "1",
         "WEBCLAW_TOOLS": "core",
         "WEBCLAW_STATUS_MODE": "fast"
       }
@@ -309,13 +309,13 @@ else
 {
   "enabled": false,
   "allow_localhost": true,
-  "allowed_hosts": [],
-  "_comment": "Default off for public install. Set enabled:true + allowed_hosts to opt in."
+  "allowed_hosts": []
 }
 EOF
   step "policy OFF → $POLICY_PATH"
 fi
 
+"$PY" -c "from webclaw_x.recipe_verbs_doc import write_recipe_verbs_doc; from pathlib import Path; print(write_recipe_verbs_doc(Path(r'''$HOME_DIR''')/'mcp'))" 2>/dev/null || true
 "$PY" -c "from webclaw_x.host_vault_probe import maybe_probe_on_startup; r=maybe_probe_on_startup(webclaw_home=r'''$HOME_DIR''', lite_bin=r'''$LITE_DEST'''); print(r.as_dict() if r else 'skipped')" 2>/dev/null || true
 
 echo
@@ -323,7 +323,8 @@ echo "安装完成。"
 echo "  lite:  $LITE_DEST"
 echo "  host:  $PY -m webclaw_x.server"
 echo "  home:  $HOME_DIR"
-echo "下一步：重启 WorkBuddy，确认 webclaw-x 绿灯；对话「用 webclaw 查一下 status」"
+echo "下一步：重启 WorkBuddy，确认 webclaw-x 绿灯；试「打开 https://example.com，等待2，采集」"
 echo "说明：https://github.com/lonk1989/webclaw-x/blob/main/docs/workbuddy-quickstart.md"
+echo "动词说明书：$HOME_DIR/mcp/RECIPE-VERBS.md"
 echo "导航白名单默认关闭；需要时编辑 $POLICY_PATH"
 echo "站点账号：写入 $HOME_DIR/host-exports/workbuddy.json（见 docs/host-vault-export.md）"

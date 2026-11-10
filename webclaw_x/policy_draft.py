@@ -59,12 +59,11 @@ def draft_policy(
                 if h not in seen:
                     seen.add(h)
                     allowed.append(h)
+    # No `_comment` key: older lite deny_unknown_fields treats it as invalid policy.json.
     return {
         "enabled": bool(enabled),
         "allow_localhost": bool(allow_localhost),
         "allowed_hosts": allowed,
-        "_comment": "DRAFT — review hosts, then copy to $WEBCLAW_HOME/policy.json. "
-        "Do not set WEBCLAW_POLICY_ENABLED=0 to bypass. Exact host match only (no wildcards).",
     }
 
 

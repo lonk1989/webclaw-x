@@ -16,6 +16,8 @@
 **WorkBuddy 可以接自定义 stdio MCP**，因此「装 WorkBuddy 跑本仓 MCP」方向成立。  
 本机（Grok Bot box）是否方便安装 WorkBuddy 客户端取决于其发行渠道（多为桌面安装包 / 腾讯系分发）；**P0 发版门禁仍以 L1（本仓 pytest）+ L2（MCP Inspector / 最小 Client）为准**，WorkBuddy 为 L3。
 
+**接通后第一优先级：** MCP `instructions`（`webclaw_x/fast_card.py`）会把「打开/点击/采集 → `webclaw_run`」交给模型；人读 [recipe-verbs.md](./recipe-verbs.md) / `$WEBCLAW_HOME/mcp/RECIPE-VERBS.md`。勿只测 accounts 列表。
+
 ## 首载加速：常驻 MCP（强制约定）
 
 第三方 Host / 自研桥 **必须常驻 stdio 会话**：
@@ -69,7 +71,7 @@
         "PYTHONPATH": "/workspace/webclaw-x",
         "WEBCLAW_LITE_BIN": "/home/box/.webclaw/bin/webclaw-lite",
         "WEBCLAW_HOME": "/home/box/.webclaw",
-        "WEBCLAW_HEADLESS": "0"
+        "WEBCLAW_HEADLESS": "1"
       }
     }
   }
@@ -89,7 +91,7 @@
       "env": {
         "WEBCLAW_LITE_BIN": "/home/box/.webclaw/bin/webclaw-lite",
         "WEBCLAW_HOME": "/home/box/.webclaw",
-        "WEBCLAW_HEADLESS": "0",
+        "WEBCLAW_HEADLESS": "1",
         "PYTHONPATH": "/workspace/webclaw-x"
       }
     }
@@ -106,8 +108,8 @@
 | ID | 在 WorkBuddy 对话中 | 期望 |
 |----|---------------------|------|
 | W-01 | 「用 webclaw 查一下 status」 | 调用 `webclaw_status`，返回统一 envelope |
-| W-02 | 粘贴完整 fixture 菜谱，要求执行 | **只**调用一次 `webclaw_run`，不逐步 probe |
-| W-03 | 打开歧义页点「确定」 | 得到 `AMBIGUOUS_TARGET` 或明确失败（patch 落地后） |
+| W-02 | 粘贴完整 fixture 菜谱，要求执行 | **只**一次 `webclaw_run`；失败至多 1 次补丁，再失败停并求助；禁止 ps1/裸 CDP 挖页 |
+| W-03 | 打开歧义页点「确定」 | 无 `#N` 默认点排名 `#1`，应成功（不要再期望 `AMBIGUOUS_TARGET`） |
 | W-04 | 跑采集菜谱 | 产物目录有 md，且 dualwrite 后有 json/csv |
 
 ## 停止 / 取消长任务

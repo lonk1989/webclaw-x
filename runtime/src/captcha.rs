@@ -1,6 +1,9 @@
 //! 登录验证码：检测 → 截图 →（可选 RapidOCR 短超时试填）→ HITL → 写入 Chrome
 
 use crate::cdp::CdpClient;
+use crate::live_wait_preview::{
+    wait_after_navigation_ticking, LiveWaitPreview,
+};
 use base64::Engine;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -455,6 +458,96 @@ async fn capture_captcha_from_canvas(client: &mut CdpClient) -> Result<Vec<u8>, 
         .map_err(|e| format!("canvas 验证码解码失败: {e}"))
 }
 
+fn captcha_png_fingerprint(png: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(png);
+    format!("{:x}", h.finalize())
+}
+
+/// Click captcha graphic / refresh control so the page loads a new code.
+async fn refresh_captcha_challenge(client: &mut CdpClient) -> Result<bool, String> {
+    let v = client
+        .evaluate_resilient(
+            r#"(() => {
+  const visible = (el) => {
+    if (!el || !(el instanceof Element)) return false;
+    const s = window.getComputedStyle(el);
+    if (s.display === 'none' || s.visibility === 'hidden' || Number(s.opacity) === 0) return false;
+    const r = el.getBoundingClientRect();
+    return r.width >= 8 && r.height >= 8;
+  };
+  const candidates = [];
+  for (const sel of [
+    '#verifyCanvas', '#vCodeImg canvas', '#vCodeImg', 'img[src*="captcha"]', 'img[src*="code"]',
+    'img[alt*="验证码"]', '[class*="captcha"] img', '[class*="vcode"] img',
+    'a[title*="刷新"]', 'button[title*="刷新"]', '[class*="refresh"]', '[aria-label*="刷新"]'
+  ]) {
+    document.querySelectorAll(sel).forEach((el) => { if (visible(el)) candidates.push(el); });
+  }
+  // Prefer canvas / captcha image, then explicit refresh controls.
+  const prefer = (el) => {
+    const t = (el.tagName || '').toUpperCase();
+    if (t === 'CANVAS') return 0;
+    if (t === 'IMG') return 1;
+    return 2;
+  };
+  candidates.sort((a, b) => prefer(a) - prefer(b));
+  const el = candidates[0];
+  if (!el) return { ok: false, reason: 'no-target' };
+  try { el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' }); } catch (_) {}
+  // Bust cached <img> URLs before click (some sites only swap query on click).
+  if ((el.tagName || '').toUpperCase() === 'IMG' && el.src) {
+    try {
+      const u = new URL(el.src, location.href);
+      u.searchParams.set('_wc', String(Date.now()));
+      el.src = u.toString();
+    } catch (_) {}
+  }
+  try { el.click(); } catch (_) {}
+  try {
+    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+  } catch (_) {}
+  return { ok: true, tag: (el.tagName || '').toLowerCase(), id: el.id || '' };
+})()"#,
+        )
+        .await?;
+    Ok(v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false))
+}
+
+/// Capture until PNG fingerprint differs from `prev_fp` (empty = first capture).
+async fn capture_fresh_captcha_image(
+    client: &mut CdpClient,
+    info: &DetectResult,
+    prev_fp: &str,
+    push_log: &impl Fn(String),
+) -> Result<(Vec<u8>, String), String> {
+    // First attempt: as-is (page may already have a new image after wrong submit).
+    let mut png = capture_captcha_image(client, info).await?;
+    let mut fp = captcha_png_fingerprint(&png);
+    if prev_fp.is_empty() || fp != prev_fp {
+        return Ok((png, fp));
+    }
+
+    push_log("验证码图未刷新（仍是上一张），点击验证码区域请求新图…".into());
+    for attempt in 1..=4 {
+        let _ = refresh_captcha_challenge(client).await;
+        tokio::time::sleep(Duration::from_millis(350 + attempt * 200)).await;
+        // Re-detect clip in case layout shifted.
+        let info2 = detect(client).await?.unwrap_or_else(|| info.clone());
+        png = capture_captcha_image(client, &info2).await?;
+        fp = captcha_png_fingerprint(&png);
+        if fp != prev_fp {
+            push_log(format!("验证码图已刷新（attempt={attempt}）"));
+            return Ok((png, fp));
+        }
+    }
+    push_log("警告：多次点击后验证码图指纹仍未变，继续用当前截图（可能 OCR 会读到旧码）".into());
+    Ok((png, fp))
+}
+
 /// 聚焦并清空验证码框，返回中心坐标；供后续 CDP insertText 使用
 async fn prepare_captcha_input(client: &mut CdpClient, selector: &str) -> Result<(f64, f64), String> {
     client.ensure_attached().await?;
@@ -855,6 +948,7 @@ async fn prompt_user<R: Runtime>(
     task_id: &str,
     png: &[u8],
     cancel: &AtomicBool,
+    client: Option<&mut CdpClient>,
 ) -> Result<String, String> {
     prompt_user_with_hint(
         app,
@@ -863,6 +957,7 @@ async fn prompt_user<R: Runtime>(
         png,
         cancel,
         "请看验证码图片，回复图上的字符",
+        client,
     )
     .await
 }
@@ -874,7 +969,9 @@ async fn prompt_user_with_hint<R: Runtime>(
     png: &[u8],
     cancel: &AtomicBool,
     hint: &str,
+    mut client: Option<&mut CdpClient>,
 ) -> Result<String, String> {
+    let mut preview = LiveWaitPreview::new("验证码");
     if let Some(bridge) = crate::human_bridge::FileHumanBridge::from_env() {
         let prompt_id = Uuid::new_v4().to_string();
         let req = crate::human_bridge::HumanRequest {
@@ -886,8 +983,9 @@ async fn prompt_user_with_hint<R: Runtime>(
             image_base64: Some(base64::engine::general_purpose::STANDARD.encode(png)),
         };
         bridge.write_request(&req, Some(png))?;
+        let live = client.as_mut().map(|c| (&mut **c, &mut preview));
         match bridge
-            .wait_reply(cancel, Duration::from_secs(600))
+            .wait_reply_ticking(cancel, Duration::from_secs(600), live)
             .await?
         {
             crate::human_bridge::HumanReply::Text(t) if !t.is_empty() => return Ok(t),
@@ -907,7 +1005,7 @@ async fn prompt_user_with_hint<R: Runtime>(
 
     let prompt_id = Uuid::new_v4().to_string();
     let b64 = base64::engine::general_purpose::STANDARD.encode(png);
-    let (tx, rx) = oneshot::channel();
+    let (tx, mut rx) = oneshot::channel();
     waiters.lock().insert(prompt_id.clone(), tx);
 
     let desktop_hint = if hint.is_empty() {
@@ -924,17 +1022,25 @@ async fn prompt_user_with_hint<R: Runtime>(
     };
     emit_captcha_required(app, &payload);
 
-    let result = tokio::select! {
-        _ = async {
-            while !cancel.load(Ordering::SeqCst) {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-        } => {
+    let result = loop {
+        if cancel.load(Ordering::SeqCst) {
             waiters.lock().remove(&prompt_id);
             emit_captcha_resolved(app, task_id, &prompt_id);
             return Err("已取消".into());
         }
-        msg = rx => msg.map_err(|_| "验证码窗口已关闭".to_string())?,
+        match rx.try_recv() {
+            Ok(msg) => break msg,
+            Err(oneshot::error::TryRecvError::Empty) => {}
+            Err(oneshot::error::TryRecvError::Closed) => {
+                waiters.lock().remove(&prompt_id);
+                emit_captcha_resolved(app, task_id, &prompt_id);
+                return Err("验证码窗口已关闭".into());
+            }
+        }
+        if let Some(ref mut c) = client {
+            let _ = preview.tick(c).await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
     };
 
     emit_captcha_resolved(app, task_id, &prompt_id);
@@ -955,12 +1061,14 @@ fn captcha_ocr_enabled() -> bool {
     }
 }
 
-/// `WEBCLAW_CAPTCHA_OCR_SUBMIT=1` 才允许 OCR 后自动点登录；默认「只填不交」。
+/// OCR 试填后默认自动点登录，尽快闭环；错了下一轮再 HITL 问用户。
+/// `WEBCLAW_CAPTCHA_OCR_SUBMIT=0` 才「只填不交」。
 fn captcha_ocr_submit_enabled() -> bool {
-    matches!(
-        std::env::var("WEBCLAW_CAPTCHA_OCR_SUBMIT").ok().as_deref(),
-        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES") | Some("on") | Some("ON")
-    )
+    match std::env::var("WEBCLAW_CAPTCHA_OCR_SUBMIT").ok().as_deref() {
+        Some("0") | Some("false") | Some("FALSE") | Some("no") | Some("NO") | Some("off")
+        | Some("OFF") => false,
+        _ => true,
+    }
 }
 
 /// 最低置信度门槛，默认 0.60；可用 `WEBCLAW_CAPTCHA_OCR_MIN_CONF` 覆盖。
@@ -1091,25 +1199,57 @@ pub async fn resolve_if_present<R: Runtime>(
     // 登录点击后常先出滑块；图形码之前/之后都可能再出现
     wait_slider_if_present(app, waiters, task_id, client, cancel, &push_log).await?;
 
-    const MAX_ROUNDS: u32 = 3;
-    for round in 0..MAX_ROUNDS {
+    // OCR at most twice on *distinct* captcha images; then HITL (do not keep
+    // reading a stale canvas after the page refreshed the code).
+    const MAX_OCR_ROUNDS: u32 = 2;
+    let mut prev_fp = String::new();
+    let mut last_ocr_code = String::new();
+    for round in 0..MAX_OCR_ROUNDS {
         let Some(info) = detect(client).await? else {
             // 无图形码时再扫一次滑块（部分站点点登录后才弹出）
             wait_slider_if_present(app, waiters, task_id, client, cancel, &push_log).await?;
             return Ok(());
         };
 
-        let png = capture_captcha_image(client, &info).await?;
+        if round > 0 {
+            // Wrong submit usually refreshes the captcha — wait/force a new image
+            // before OCR so we never re-read the previous PNG bytes.
+            let _ = refresh_captcha_challenge(client).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        let (png, fp) =
+            capture_fresh_captcha_image(client, &info, &prev_fp, &push_log).await?;
+        prev_fp = fp;
+        write_captcha_live_preview(&png);
         let ocr = try_ocr_captcha_outcome(&png).await;
         let mut from_ocr = false;
         let code = match &ocr {
             CaptchaOcrOutcome::Ok { code, score } => {
-                from_ocr = true;
-                push_log(format!(
-                    "验证码 OCR 试填：{code} conf={score:.2} [{}]",
-                    ocr.code_tag()
-                ));
-                code.clone()
+                // Same code on a supposedly-new image is a stale-read smell → HITL.
+                if !last_ocr_code.is_empty() && last_ocr_code == *code {
+                    push_log(format!(
+                        "验证码 OCR 连续得到相同结果「{code}」，疑似读到旧图 — 改为人工输入"
+                    ));
+                    prompt_user_with_hint(
+                        app,
+                        waiters,
+                        task_id,
+                        &png,
+                        cancel,
+                        "OCR 可能读到旧验证码，请看图输入当前字符",
+                        Some(client),
+                    )
+                    .await?
+                } else {
+                    from_ocr = true;
+                    last_ocr_code = code.clone();
+                    push_log(format!(
+                        "验证码 OCR 试填：{code} conf={score:.2} [{}]",
+                        ocr.code_tag()
+                    ));
+                    code.clone()
+                }
             }
             other => {
                 let detail = match other {
@@ -1134,7 +1274,7 @@ pub async fn resolve_if_present<R: Runtime>(
                     format!("验证码仍可见，请重新输入（第 {} 次）", round + 1)
                 };
                 push_log(line);
-                prompt_user(app, waiters, task_id, &png, cancel).await?
+                prompt_user(app, waiters, task_id, &png, cancel, Some(client)).await?
             }
         };
 
@@ -1161,19 +1301,25 @@ pub async fn resolve_if_present<R: Runtime>(
             }
         }
 
-        // OCR 默认「只填不交」：不自动点登录，避免读错烧掉站点重试；需 SUBMIT=1 才自动点。
+        // OCR 默认试填并提交；失败则下一轮回落 HITL。SUBMIT=0 时才「只填不交」等人确认。
         let allow_auto_submit = !from_ocr || captcha_ocr_submit_enabled();
         if retry_login && allow_auto_submit {
             tokio::time::sleep(Duration::from_millis(200)).await;
             if let Err(e) = click_login_button(client).await {
                 push_log(format!("自动点击登录: {e}（可手动点击）"));
             } else {
-                push_log("已再次点击登录".into());
-                let _ = client.wait_after_navigation_cancel(15, Some(cancel)).await;
+                push_log(if from_ocr {
+                    "OCR 试填后已自动点击登录".into()
+                } else {
+                    "已再次点击登录".into()
+                });
+                let mut nav_preview = LiveWaitPreview::new("登录");
+                let _ = wait_after_navigation_ticking(client, 15, Some(cancel), &mut nav_preview)
+                    .await;
             }
             wait_slider_if_present(app, waiters, task_id, client, cancel, &push_log).await?;
         } else if retry_login && from_ocr {
-            push_log("OCR_OK 只填不交：已填，请确认后继续".into());
+            push_log("OCR_OK 只填不交（WEBCLAW_CAPTCHA_OCR_SUBMIT=0）：已填，请确认后继续".into());
             let _ = prompt_user_with_hint(
                 app,
                 waiters,
@@ -1181,6 +1327,7 @@ pub async fn resolve_if_present<R: Runtime>(
                 &png,
                 cancel,
                 "OCR_OK 只填不交：已填未提交，回复同码确认或改码",
+                Some(client),
             )
             .await?;
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1188,7 +1335,9 @@ pub async fn resolve_if_present<R: Runtime>(
                 push_log(format!("确认后点击登录: {e}（可手动点击）"));
             } else {
                 push_log("确认后已点击登录".into());
-                let _ = client.wait_after_navigation_cancel(15, Some(cancel)).await;
+                let mut nav_preview = LiveWaitPreview::new("登录");
+                let _ = wait_after_navigation_ticking(client, 15, Some(cancel), &mut nav_preview)
+                    .await;
             }
             wait_slider_if_present(app, waiters, task_id, client, cancel, &push_log).await?;
         }
@@ -1226,14 +1375,81 @@ pub async fn resolve_if_present<R: Runtime>(
             ));
         }
 
-        tokio::time::sleep(Duration::from_millis(800)).await;
+        {
+            let mut settle = LiveWaitPreview::new("验证码");
+            let _ = settle
+                .sleep_tick(Duration::from_millis(800), Some(cancel), Some(client))
+                .await;
+        }
         if detect(client).await?.is_none() {
             push_log("验证码已通过".into());
             wait_slider_if_present(app, waiters, task_id, client, cancel, &push_log).await?;
             return Ok(());
         }
     }
-    Err("验证码多次尝试仍未通过".into())
+
+    // OCR 自动试填用尽：回落人工（必须给人看「当前」验证码图，而不是旧帧）。
+    push_log("验证码 OCR 多次未通过，改为请求人工输入".into());
+    let Some(info) = detect(client).await? else {
+        wait_slider_if_present(app, waiters, task_id, client, cancel, &push_log).await?;
+        return Ok(());
+    };
+    let _ = refresh_captcha_challenge(client).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (png, _) =
+        capture_fresh_captcha_image(client, &info, &prev_fp, &push_log).await?;
+    write_captcha_live_preview(&png);
+    let code = prompt_user_with_hint(
+        app,
+        waiters,
+        task_id,
+        &png,
+        cancel,
+        "OCR 多次未通过，请看图输入验证码字符",
+        Some(client),
+    )
+    .await?;
+    let selector = info
+        .input_selector
+        .as_deref()
+        .filter(|s| !s.is_empty() && *s != "input")
+        .unwrap_or("input[placeholder*=\"验证码\"]");
+    fill_captcha(client, selector, &code).await?;
+    push_log("已填入人工验证码".into());
+    if retry_login && login_form.has_credentials() {
+        refill_login_form(client, login_form).await?;
+        push_log("已重新填入账号与密码".into());
+    }
+    if retry_login {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        if let Err(e) = click_login_button(client).await {
+            push_log(format!("人工码后点击登录: {e}（可手动点击）"));
+        } else {
+            push_log("人工码后已点击登录".into());
+            let mut nav_preview = LiveWaitPreview::new("登录");
+            let _ = wait_after_navigation_ticking(client, 15, Some(cancel), &mut nav_preview)
+                .await;
+        }
+        wait_slider_if_present(app, waiters, task_id, client, cancel, &push_log).await?;
+    }
+    {
+        let mut settle = LiveWaitPreview::new("验证码");
+        let _ = settle
+            .sleep_tick(Duration::from_millis(800), Some(cancel), Some(client))
+            .await;
+    }
+    if detect(client).await?.is_none() {
+        push_log("验证码已通过（人工）".into());
+        wait_slider_if_present(app, waiters, task_id, client, cancel, &push_log).await?;
+        return Ok(());
+    }
+    Err("验证码多次尝试仍未通过（含人工一次）".into())
+}
+
+/// Captcha crops stay on human/captcha.png (+ last-captcha.png) for HITL.
+/// Do NOT push crops into live-preview / timeline — sidebar must show real page shots.
+fn write_captcha_live_preview(_png: &[u8]) {
+    // intentionally no-op (kept so call sites stay stable)
 }
 
 const DETECT_SLIDER_JS: &str = r#"(() => {
@@ -1313,6 +1529,7 @@ async fn wait_slider_if_present<R: Runtime>(
 
     push_log("检测到滑块验证，请在浏览器中拖动完成…".into());
     let _ = client.activate_tab().await;
+    let mut preview = LiveWaitPreview::new("验证码");
 
     if let Some(bridge) = crate::human_bridge::FileHumanBridge::from_env() {
         let prompt_id = Uuid::new_v4().to_string();
@@ -1335,6 +1552,7 @@ async fn wait_slider_if_present<R: Runtime>(
                 bridge.clear_request();
                 return Err("等待滑块验证超时（5 分钟）".into());
             }
+            let _ = preview.tick(client).await;
             if !page_has_slider(client).await.unwrap_or(false) {
                 bridge.clear_request();
                 push_log("滑块验证已通过".into());
@@ -1432,6 +1650,7 @@ async fn wait_slider_if_present<R: Runtime>(
             }
         }
 
+        let _ = preview.tick(client).await;
         let still = page_has_slider(client).await.unwrap_or(false);
         if !still {
             break;
@@ -1492,6 +1711,7 @@ pub async fn wait_human_assist<R: Runtime>(
     crate::browser_network::force_release_new_target_pause(client.port).await;
     let _ = client.activate_tab().await;
 
+    let mut preview = LiveWaitPreview::new("等待");
     if let Some(bridge) = crate::human_bridge::FileHumanBridge::from_env() {
         let prompt_id = Uuid::new_v4().to_string();
         let req = crate::human_bridge::HumanRequest {
@@ -1504,7 +1724,10 @@ pub async fn wait_human_assist<R: Runtime>(
         };
         bridge.write_request(&req, None)?;
         let timeout = Duration::from_secs(timeout_secs.clamp(10, 3600));
-        match bridge.wait_reply(cancel, timeout).await? {
+        match bridge
+            .wait_reply_ticking(cancel, timeout, Some((client, &mut preview)))
+            .await?
+        {
             crate::human_bridge::HumanReply::Cancelled => return Err("已取消人机验证".into()),
             crate::human_bridge::HumanReply::Confirmed | crate::human_bridge::HumanReply::Text(_) => {
                 push_log("人机验证已确认完成".into());
@@ -1564,6 +1787,7 @@ pub async fn wait_human_assist<R: Runtime>(
             }
         }
 
+        let _ = preview.tick(client).await;
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
@@ -1636,8 +1860,10 @@ mod captcha_ocr_tests {
     }
 
     #[test]
-    fn captcha_ocr_submit_defaults_off_fill_only() {
+    fn captcha_ocr_submit_defaults_on_try_submit() {
         std::env::remove_var("WEBCLAW_CAPTCHA_OCR_SUBMIT");
+        assert!(captcha_ocr_submit_enabled());
+        std::env::set_var("WEBCLAW_CAPTCHA_OCR_SUBMIT", "0");
         assert!(!captcha_ocr_submit_enabled());
         std::env::set_var("WEBCLAW_CAPTCHA_OCR_SUBMIT", "1");
         assert!(captcha_ocr_submit_enabled());

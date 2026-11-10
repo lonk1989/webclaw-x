@@ -701,33 +701,7 @@ async fn locate_global_click_text_once(
 
     let total = entries.len() as u32;
     entries.sort_by(cmp_click_text_catalog);
-    // webclaw-x P0: global_index==0 means must be unique — refuse silent first-match
-    if global_index == 0 {
-        if entries.is_empty() {
-            return Err(format!(
-                "未找到「{query}」（跨 frame 共 0 个足够匹配）"
-            ));
-        }
-        if entries.len() > 1 {
-            let preview: Vec<String> = entries
-                .iter()
-                .take(8)
-                .enumerate()
-                .map(|(i, h)| format_ambiguous_candidate(i + 1, h))
-                .collect();
-            return Err(format!(
-                "AMBIGUOUS_TARGET:「{query}」匹配到 {total} 个候选，请加 #序号（例如 点击{query}#1）。候选：{}",
-                preview.join("；")
-            ));
-        }
-        let hit = &entries[0];
-        return Ok(StructuralLocalHit {
-            local_index: hit.local_index,
-            target_id: hit.target_id.clone(),
-            context_id: hit.context_id,
-            is_parent: hit.is_parent,
-        });
-    }
+    // No #N parses as global_index=1 — click the top-ranked match. Explicit #N picks N.
     if global_index < 1 || global_index as usize > entries.len() {
         return Err(format!(
             "未找到「{query}」#{global_index}（跨 frame 共 {total} 个足够匹配）"
@@ -750,7 +724,6 @@ pub async fn locate_global_click_text_with_hot(
     hot: &FrameHotPath,
     cancel: Option<&AtomicBool>,
 ) -> Result<StructuralLocalHit, String> {
-    // index 0 = must be unique (webclaw-x P0); explicit #N is >= 1
     if cancelled(cancel) {
         return Err("已取消".into());
     }
