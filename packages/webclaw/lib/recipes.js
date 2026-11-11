@@ -154,3 +154,11 @@ export function agentCwd(exec) {
     const cwd = agent?.session?.header?.cwd?.trim();
     return cwd || undefined;
 }
+/** Best-effort chat session id for library artifact marks. */
+export function agentSessionId(exec) {
+    const agent = exec.agent;
+    const id = agent?.session?.header?.id?.trim()
+        || agent?.session?.header?.sessionId?.trim()
+        || agent?.session?.id?.trim();
+    return id || undefined;
+}

@@ -94,6 +94,10 @@ pub fn print_usage() {
   webclaw-lite update
   webclaw-lite skills sync --from-dir <目录>
   webclaw-lite skills list
+  webclaw-lite scripts list
+  webclaw-lite scripts run --name <脚本名> [--args \"参数…\"] [--from-run-dir <dir>] [--input <file>]…
+  webclaw-lite scripts read-table --input <xlsx|xls> [--sheet 名|序号] [--header-row 0] [--limit 20] [--max-cols 40]
+  webclaw-lite scripts ocr-image --input <png|jpg|…>
   webclaw-lite accounts list
   webclaw-lite accounts ensure --id ehr|old-mes [--name 名称] --url URL
   webclaw-lite accounts set --id ehr|old-mes [--name 名称] [--url URL] --user 账号 --password 密码
@@ -107,6 +111,9 @@ pub fn print_usage() {
   遇验证码：读 need_human 事件 → 向用户要码 → human-reply --text … → 继续等 JSONL。
   正在跑的任务卡住：另开进程执行 cancel（不要用 human-reply --cancel 代替）。
   产物在 <WEBCLAW_HOME>/runs/<runId>/downloads|documents。
+  scripts：本机 Rhai 业务库（Excel/文件等），不启浏览器；表格类优先于 Python 办公运行时。
+  scripts read-table：通用读表预览（calamine，无需 xlrd）。
+  scripts ocr-image：本地 RapidOCR 读图转文字（无多模态模型时用）。
 
 环境变量:
   WEBCLAW_HOME          数据根（默认 %LOCALAPPDATA%\\\\webclaw 或 ~/.webclaw）
@@ -1579,7 +1586,363 @@ pub fn run_cli() {
                 std::process::exit(2);
             }
         },
+        "scripts" => match scripts_cli(&args) {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(2);
+            }
+        },
         // 其余交给 worker 内核（run / update / last-log / accounts …）
         _ => crate::worker::run_cli(),
     }
+}
+
+fn scripts_cli(args: &[String]) -> Result<(), String> {
+    ensure_lite_env();
+    let sub = args.get(2).map(|s| s.as_str()).unwrap_or("list");
+    match sub {
+        "list" | "ls" => {
+            // Host 面不列出微信本地资源类脚本
+            let items = crate::scripts::list_scripts_for_host()?;
+            let rows: Vec<serde_json::Value> = items
+                .into_iter()
+                .map(|s| {
+                    json!({
+                        "id": s.id,
+                        "name": s.name,
+                        "description": s.description,
+                        "builtin": s.builtin,
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                json!({
+                    "type": "scripts",
+                    "ok": true,
+                    "count": rows.len(),
+                    "items": rows,
+                })
+            );
+            Ok(())
+        }
+        "run" => scripts_run_cli(args),
+        "read-table" | "peek-table" | "peek" => scripts_read_table_cli(args),
+        "ocr-image" | "ocr" => scripts_ocr_image_cli(args),
+        "-h" | "--help" | "help" => {
+            eprintln!(
+                "usage:\n  webclaw-lite scripts list\n  webclaw-lite scripts run --name <名> [--args \"…\"] [--from-run-dir <dir>] [--input <file>]…\n  webclaw-lite scripts read-table --input <xlsx|xls> [--sheet 名|序号] [--header-row 0] [--limit 20] [--max-cols 40]\n  webclaw-lite scripts ocr-image --input <png|jpg|…>"
+            );
+            Ok(())
+        }
+        other => Err(format!("未知子命令: {other}（可用 list、run、read-table、ocr-image）")),
+    }
+}
+
+fn scripts_ocr_image_cli(args: &[String]) -> Result<(), String> {
+    let mut input: Option<PathBuf> = None;
+    let mut i = 3;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--input" | "-i" | "--file" | "-f" => {
+                i += 1;
+                input = Some(PathBuf::from(
+                    args.get(i).ok_or("--input 需要图片路径")?,
+                ));
+            }
+            "-h" | "--help" => {
+                eprintln!("usage: webclaw-lite scripts ocr-image --input <png|jpg|webp|…>");
+                return Ok(());
+            }
+            other => return Err(format!("未知参数: {other}")),
+        }
+        i += 1;
+    }
+    let path = input.ok_or("请传 --input <图片路径>")?;
+    if !path.is_file() {
+        return Err(format!("图片不存在: {}", path.display()));
+    }
+    // First call may download ONNX models into %LOCALAPPDATA%/webclaw/ocr-models.
+    let text = crate::rhai_runtime::local_ocr::ocr_image_file(&path)?;
+    let line_count = text.lines().filter(|l| !l.trim().is_empty()).count();
+    println!(
+        "{}",
+        json!({
+            "type": "ocr_image",
+            "ok": true,
+            "path": path.display().to_string(),
+            "text": text,
+            "lineCount": line_count,
+            "hint": "本地 RapidOCR 结果；无多模态模型时用此文本推理，勿再把原图塞给文本模型。",
+        })
+    );
+    Ok(())
+}
+
+fn scripts_read_table_cli(args: &[String]) -> Result<(), String> {
+    let mut input: Option<PathBuf> = None;
+    let mut sheet: Option<String> = None;
+    let mut header_row: usize = 0;
+    let mut limit: usize = 20;
+    let mut max_cols: usize = 40;
+    let mut i = 3;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--input" | "-i" | "--file" | "-f" => {
+                i += 1;
+                input = Some(PathBuf::from(
+                    args.get(i).ok_or("--input 需要文件路径")?,
+                ));
+            }
+            "--sheet" | "-s" => {
+                i += 1;
+                sheet = Some(
+                    args.get(i)
+                        .cloned()
+                        .ok_or("--sheet 需要表名或 0 基序号")?,
+                );
+            }
+            "--header-row" => {
+                i += 1;
+                header_row = args
+                    .get(i)
+                    .ok_or("--header-row 需要数字")?
+                    .parse()
+                    .map_err(|_| "--header-row 须为非负整数")?;
+            }
+            "--limit" | "-n" => {
+                i += 1;
+                limit = args
+                    .get(i)
+                    .ok_or("--limit 需要数字")?
+                    .parse()
+                    .map_err(|_| "--limit 须为正整数")?;
+                if limit == 0 {
+                    limit = 1;
+                }
+                if limit > 200 {
+                    limit = 200;
+                }
+            }
+            "--max-cols" => {
+                i += 1;
+                max_cols = args
+                    .get(i)
+                    .ok_or("--max-cols 需要数字")?
+                    .parse()
+                    .map_err(|_| "--max-cols 须为正整数")?;
+                if max_cols == 0 {
+                    max_cols = 1;
+                }
+                if max_cols > 100 {
+                    max_cols = 100;
+                }
+            }
+            "-h" | "--help" => {
+                eprintln!(
+                    "usage: webclaw-lite scripts read-table --input <xlsx|xls> [--sheet 名|序号] [--header-row 0] [--limit 20] [--max-cols 40]"
+                );
+                return Ok(());
+            }
+            other => return Err(format!("未知参数: {other}")),
+        }
+        i += 1;
+    }
+    let path = input.ok_or("请传 --input <xlsx|xls 路径>")?;
+    let peeked = crate::rhai_runtime::table::peek_table_json(
+        &path,
+        crate::rhai_runtime::table::TablePeekOptions {
+            sheet,
+            header_row,
+            limit,
+            max_cols,
+        },
+    )?;
+    println!("{peeked}");
+    Ok(())
+}
+
+fn scripts_run_cli(args: &[String]) -> Result<(), String> {
+    let mut name = String::new();
+    let mut script_args = String::new();
+    let mut from_run_dir: Option<PathBuf> = None;
+    let mut inputs: Vec<PathBuf> = Vec::new();
+    let mut i = 3;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--name" | "-n" => {
+                i += 1;
+                name = args
+                    .get(i)
+                    .cloned()
+                    .ok_or("--name 需要脚本名")?;
+            }
+            "--args" | "-a" => {
+                i += 1;
+                script_args = args
+                    .get(i)
+                    .cloned()
+                    .ok_or("--args 需要参数字符串")?;
+            }
+            "--from-run-dir" => {
+                i += 1;
+                from_run_dir = Some(PathBuf::from(
+                    args.get(i).ok_or("--from-run-dir 需要路径")?,
+                ));
+            }
+            "--input" | "-i" => {
+                i += 1;
+                inputs.push(PathBuf::from(
+                    args.get(i).ok_or("--input 需要文件路径")?,
+                ));
+            }
+            "-h" | "--help" => {
+                eprintln!(
+                    "usage: webclaw-lite scripts run --name <脚本名> [--args \"…\"] [--from-run-dir <dir>] [--input <file>]…"
+                );
+                return Ok(());
+            }
+            other => return Err(format!("未知参数: {other}")),
+        }
+        i += 1;
+    }
+    if name.trim().is_empty() {
+        return Err("请传 --name <脚本名>，如：合并考勤数据".into());
+    }
+
+    let invocation = if script_args.trim().is_empty() {
+        name.trim().to_string()
+    } else {
+        format!("{} {}", name.trim(), script_args.trim())
+    };
+    let (script, rest) = crate::scripts::resolve_invocation(&invocation)?;
+    if crate::scripts::is_wechat_local_script(&script) {
+        return Err(format!(
+            "脚本「{}」依赖微信本地资源，未通过 Host/scripts 对外暴露",
+            script.name
+        ));
+    }
+    if let Err(e) = crate::scripts::rhai_syntax_ok(&script.script) {
+        return Err(format!(
+            "脚本「{}」不是可执行的 Rhai（{e}）。请用 webclaw_script_list 里的业务脚本（如「合并考勤数据」），不要跑说明文/测试模板。",
+            script.name
+        ));
+    }
+    let _ = crate::zhj_remote::ensure_templates_for_script(&script.name);
+    let _ = crate::templates::ensure_template_files();
+
+    let session = crate::run_artifacts::RunSession::new(
+        &format!("script-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+        &format!("脚本{}", script.name),
+        None,
+    )?;
+    let run_dir = session.run_dir.clone();
+
+    if let Some(src) = from_run_dir.as_ref() {
+        if !src.is_dir() {
+            return Err(format!("--from-run-dir 不存在: {}", src.display()));
+        }
+        for sub in ["downloads", "files", "documents"] {
+            let from = src.join(sub);
+            let to = run_dir.join(sub);
+            if !from.is_dir() {
+                continue;
+            }
+            copy_dir_files(&from, &to)?;
+        }
+    }
+    for path in &inputs {
+        if !path.is_file() {
+            return Err(format!("--input 不是文件: {}", path.display()));
+        }
+        let dest = run_dir.join("files").join(
+            path.file_name()
+                .ok_or_else(|| format!("无效文件名: {}", path.display()))?,
+        );
+        std::fs::copy(path, &dest).map_err(|e| format!("复制输入失败 {}: {e}", path.display()))?;
+    }
+
+    let templates_dir = crate::templates::templates_dir();
+    let result = crate::rhai_runtime::run_script_cancel(
+        &script.script,
+        &run_dir,
+        &templates_dir,
+        &rest,
+        None,
+        None,
+        None,
+    )?;
+    let _ = session.sync_files();
+
+    let mut artifacts = Vec::new();
+    for art in &result.artifacts {
+        let rel = art
+            .path
+            .strip_prefix(&run_dir)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| art.path.to_string_lossy().into_owned());
+        artifacts.push(json!({
+            "name": art.name,
+            "path": art.path.to_string_lossy(),
+            "relPath": rel,
+        }));
+    }
+    // Also surface files/ that scripts wrote without track_output.
+    if let Ok(rd) = std::fs::read_dir(run_dir.join("files")) {
+        for ent in rd.flatten() {
+            let p = ent.path();
+            if !p.is_file() {
+                continue;
+            }
+            let name = p
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if artifacts.iter().any(|a| a.get("name").and_then(|v| v.as_str()) == Some(name.as_str()))
+            {
+                continue;
+            }
+            artifacts.push(json!({
+                "name": name,
+                "path": p.to_string_lossy(),
+                "relPath": format!("files/{name}"),
+            }));
+        }
+    }
+
+    println!(
+        "{}",
+        json!({
+            "type": "script_done",
+            "ok": true,
+            "name": script.name,
+            "id": script.id,
+            "args": rest,
+            "run_dir": run_dir.display().to_string(),
+            "message": result.message,
+            "logs": result.logs,
+            "artifacts": artifacts,
+        })
+    );
+    Ok(())
+}
+
+fn copy_dir_files(from: &Path, to: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(to).map_err(|e| e.to_string())?;
+    let rd = std::fs::read_dir(from).map_err(|e| format!("读 {}: {e}", from.display()))?;
+    for ent in rd.flatten() {
+        let src = ent.path();
+        if !src.is_file() {
+            continue;
+        }
+        let name = match src.file_name() {
+            Some(n) => n,
+            None => continue,
+        };
+        let dest = to.join(name);
+        std::fs::copy(&src, &dest)
+            .map_err(|e| format!("复制 {} → {}: {e}", src.display(), dest.display()))?;
+    }
+    Ok(())
 }

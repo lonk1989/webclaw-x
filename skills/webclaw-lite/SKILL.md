@@ -22,24 +22,28 @@ Deterministic browser RPA driven by **Chinese natural-language recipes** stored 
 | `(点击取消?)` / `（试探？备选）` | Keep literally (runtime probe: try / fallback-or-skip) | Strip as comments; force unconditional click |
 | User already gave business fields (e.g. 请假：年假 / 日期 / 原因) | Keep `参数…=` / `{{名}}`; put values in `params`; Host confirms then run | Inline literals then skip confirm; re-ask on retry |
 | Points at `recipes/*.webclaw` | Same as above | Probe “to be safe” |
+| 用户图片 / 截图 | `webclaw_vision_status` → `preferOcr` 则 `webclaw_ocr_image` | 文本模型硬吃图片报错 |
+| 新的 / 未知 Excel | `webclaw_read_table(path)` | pip xlrd/openpyxl 作第一眼 |
+| Excel / 合并表格 / 考勤汇总 / 本地文件脚本 | `webclaw_script_*`；跨 run 用 `fromRunDir` / `inputPaths` | Python first; shell 拷贝 `%LOCALAPPDATA%/webclaw/runs` 另一任务产物 |
 | New unknown site, **no** complete recipe | Authoring: `webclaw_probe` ↔ short `webclaw_run` | Invent labels; Playwright |
 | Login / EHR / 飞书 SSO | `登录EHR系统` via `webclaw_run`. Vault needs **correct SSO URL** only (`…/login?sso=lark&…`). No password. | Ask password; paste `webclaw-lite.exe accounts set`; block because `has_password=false`; invent password form |
 
-**Rule of thumb:** One (or two with param confirm) `webclaw_run` — not probe loops, not password chats, not extra Q&A.
+**Rule of thumb:** Browser → `webclaw_run`. Rhai library → `webclaw_script_*`. One (or two with param confirm) `webclaw_run` — not probe loops, not password chats, not extra Q&A.
 
 ## Modes
 
 | Mode | When | Tools |
 |------|------|-------|
 | **Replay (default)** | Full recipe / path / frozen file | `webclaw_run` (+ param confirm when needed) |
+| **Scripts** | Local Rhai Excel/file library (no browser) | `webclaw_read_table` → `webclaw_script_*` |
 | **Authoring** | New / unknown site, no complete recipe | `webclaw_probe` ↔ short `webclaw_run` |
 | **Freeze** | Path works and should be kept | `webclaw_freeze` |
 
 ## Rules
 
-1. Prefer Host tools: `webclaw_status`, `webclaw_accounts_status`, `webclaw_inspect_params`, `webclaw_probe`, `webclaw_run`, `webclaw_freeze`, `webclaw_list_recipes`, `webclaw_import`, `webclaw_human_reply`, `webclaw_cancel`, `webclaw_set_display`, `webclaw_browser`
-2. **Forbidden**: Playwright / Puppeteer / CSS / invented verbs / labels not in the latest probe (authoring only); PowerShell / `taskkill` / `Stop-Process` / `kill` to manage Chrome
-3. Chat attachments are one-shot. Durable library: `webclaw_import` / `webclaw_freeze`
+1. Prefer Host tools: `webclaw_status`, `webclaw_vision_status`, `webclaw_ocr_image`, `webclaw_accounts_status`, `webclaw_inspect_params`, `webclaw_probe`, `webclaw_run`, `webclaw_read_table`, `webclaw_script_list`, `webclaw_script_run`, `webclaw_freeze`, `webclaw_list_recipes`, `webclaw_import`, `webclaw_human_reply`, `webclaw_cancel`, `webclaw_set_display`, `webclaw_browser`
+2. **Forbidden**: Playwright / Puppeteer / CSS / invented verbs / labels not in the latest probe (authoring only); PowerShell / `taskkill` / `Stop-Process` / `kill` to manage Chrome; shell `Copy-Item`/`cp` under `webclaw/runs` (never borrow another task’s downloads — use `fromRunDir` / `inputPaths`); running「测试脚本」or non-Rhai prose/JS via `webclaw_script_run`
+3. Chat attachments are one-shot. Durable library: `webclaw_import` / `webclaw_freeze`. Download→script: same `run_dir` in one recipe, or `webclaw_script_run(fromRunDir=…)`. Only script names from `webclaw_script_list` (e.g. `合并考勤数据`).
 4. **Install**: Windows / macOS (arm64) plugin auto-downloads lite. Intel Mac / Linux: build `runtime/` or set `binaryPath`. Gatekeeper: `xattr -d com.apple.quarantine ~/.webclaw/bin/webclaw-lite`
 5. Never turn a long user recipe into multi-round probe
 6. **参数**: Prefab defaults are placeholders — confirm or「用默认」. If the user already supplied the values in chat, merge into `params` and run; do not re-interview

@@ -202,3 +202,20 @@ export function agentCwd(exec: { agent?: unknown }): string | undefined {
   const cwd = agent?.session?.header?.cwd?.trim()
   return cwd || undefined
 }
+
+/** Best-effort chat session id for library artifact marks. */
+export function agentSessionId(exec: { agent?: unknown }): string | undefined {
+  const agent = exec.agent as
+    | {
+        session?: {
+          id?: string
+          header?: { id?: string; sessionId?: string }
+        }
+      }
+    | undefined
+  const id =
+    agent?.session?.header?.id?.trim()
+    || agent?.session?.header?.sessionId?.trim()
+    || agent?.session?.id?.trim()
+  return id || undefined
+}

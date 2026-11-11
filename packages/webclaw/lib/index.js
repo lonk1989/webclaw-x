@@ -11,7 +11,9 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import z from '@deepseek-ai/schemastery';
 import { ensureLite, resolveBinaryPath, resolveLiteBaseUrl, resolveWebclawHome, } from './ensure-lite.js';
 import { cancelActiveHitl, hasActiveHitl, parseDoneEvent, resumeActiveHitl, runLite, writeCancelMarker, writeTempRecipe, } from './spawn.js';
-import { agentCwd, freezeRecipe, importRecipe, listRecipes, resolveRecipePath, } from './recipes.js';
+import { agentCwd, agentSessionId, freezeRecipe, importRecipe, listRecipes, resolveRecipePath, } from './recipes.js';
+import { promoteRunDeliverables } from './promote-outputs.js';
+import { rememberAssembledModel, resolveVisionCapability } from './model-vision.js';
 import { applyParamOverrides, collectConfirmableParams, extractRecipeParams, parseParamsArg, } from './params.js';
 import { redactSecrets } from './redact.js';
 import { sanitizeWebclawRecipe } from './url-coerce.js';
@@ -204,51 +206,54 @@ let askUserQuestions = null;
  * trusting `paramsConfirmed=true` (models otherwise skip the human).
  */
 const pendingParamGates = new Map();
-/**
- * Session-scoped values the human already confirmed. Survives recipe body
- * changes on failure→patch retries so we do not re-interview the same fields.
- */
-const sessionConfirmedByName = new Map();
+const confirmedByChatSession = new Map();
 const SESSION_PARAM_TTL_MS = 2 * 60 * 60 * 1000;
-let sessionConfirmedAt = 0;
-function touchSessionParams() {
-    if (sessionConfirmedAt && Date.now() - sessionConfirmedAt > SESSION_PARAM_TTL_MS) {
-        sessionConfirmedByName.clear();
-        sessionConfirmedAt = 0;
-    }
+function chatSessionKey(sessionId) {
+    const id = sessionId?.trim();
+    // No chat id → isolate by process so we never treat Host-wide as "confirmed".
+    return id && id !== '' ? `chat:${id}` : `anon:${process.pid}`;
 }
-function rememberConfirmedParams(params) {
-    touchSessionParams();
+function touchSessionParams(sessionId) {
+    const key = chatSessionKey(sessionId);
+    const cutoff = Date.now() - SESSION_PARAM_TTL_MS;
+    for (const [k, bag] of confirmedByChatSession) {
+        if (bag.at < cutoff)
+            confirmedByChatSession.delete(k);
+    }
+    const bag = confirmedByChatSession.get(key);
+    return bag?.byName ?? new Map();
+}
+function rememberConfirmedParams(params, sessionId) {
+    const key = chatSessionKey(sessionId);
+    const byName = new Map(touchSessionParams(sessionId));
     for (const p of params) {
         const name = p.name.trim();
         if (!name)
             continue;
-        sessionConfirmedByName.set(name, p.value);
+        byName.set(name, p.value);
     }
-    sessionConfirmedAt = Date.now();
+    confirmedByChatSession.set(key, { at: Date.now(), byName });
 }
-function seedParamsFromSession(params, overrides) {
-    touchSessionParams();
+function seedParamsFromSession(params, overrides, sessionId) {
+    const confirmed = touchSessionParams(sessionId);
     return params.map(p => {
         const fromOverride = overrides?.[p.name];
         if (fromOverride != null && String(fromOverride).trim() !== '') {
             return { name: p.name, value: String(fromOverride) };
         }
-        if (sessionConfirmedByName.has(p.name)) {
-            return { name: p.name, value: sessionConfirmedByName.get(p.name) ?? '' };
+        if (confirmed.has(p.name)) {
+            return { name: p.name, value: confirmed.get(p.name) ?? '' };
         }
         return { name: p.name, value: p.value };
     });
 }
-/** Names not yet confirmed this session and not supplied via non-empty overrides. */
-function paramsNeedingAsk(params, overrides) {
-    touchSessionParams();
-    return params.filter(p => {
-        const fromOverride = overrides?.[p.name];
-        if (fromOverride != null && String(fromOverride).trim() !== '')
-            return false;
-        return !sessionConfirmedByName.has(p.name);
-    });
+/**
+ * Fields that still need a human confirm UI / needParams round-trip.
+ * Prefill from tool `params` or recipe defaults does NOT skip the ask.
+ */
+function paramsNeedingAsk(params, sessionId) {
+    const confirmed = touchSessionParams(sessionId);
+    return params.filter(p => !confirmed.has(p.name));
 }
 function paramGateKey(sourcePath, content) {
     if (sourcePath)
@@ -402,15 +407,23 @@ function finalizeRunResult(result, ctx) {
         const image = (typeof nh.inbox_image === 'string' && nh.inbox_image) ||
             (typeof nh.image_path === 'string' && nh.image_path) ||
             '';
+        const preferOcr = ctx.vision?.preferOcr !== false && ctx.vision?.supportsImage !== true;
+        const ocrText = (ctx.captchaOcrText || '').trim();
         return {
             ok: false,
             needHuman: true,
             code: 'NEED_HUMAN',
-            error: 'NEED_HUMAN：必须立刻向用户展示验证码图并索要字符，禁止自行猜测/空等/只说「请查看浏览器」。拿到字符后调用 webclaw_human_reply(mode="text", text=用户输入, run_dir=本字段)。禁止在未询问用户的情况下继续其它工具。',
+            error: preferOcr
+                ? 'NEED_HUMAN：当前模型无可靠读图能力。已尽量 OCR；请把识别文字/路径给用户确认，索要验证码字符后 webclaw_human_reply。禁止把原图塞给文本模型。'
+                : 'NEED_HUMAN：必须立刻向用户展示验证码图并索要字符，禁止自行猜测/空等/只说「请查看浏览器」。拿到字符后调用 webclaw_human_reply(mode="text", text=用户输入, run_dir=本字段)。禁止在未询问用户的情况下继续其它工具。',
             hint,
             kind: typeof nh.kind === 'string' ? nh.kind : 'captcha',
             prompt_id: typeof nh.prompt_id === 'string' ? nh.prompt_id : '',
             image_path: image,
+            // Text-only models: omit image injection in render when we have OCR / preferOcr.
+            injectImage: !preferOcr,
+            ocrText: ocrText || undefined,
+            preferOcr,
             run_dir: result.run_dir || '',
             eventsTail: redactSecrets(result.stdout.slice(-4000)),
             recipePath: ctx.path,
@@ -431,12 +444,13 @@ function finalizeRunResult(result, ctx) {
     const needsCredHint = !ok &&
         ctx.missingCreds.length > 0 &&
         /账号|密码|网站账号|凭据/u.test(errorText);
-    return {
+    const runDir = done?.run_dir || result.run_dir || '';
+    const payload = {
         ok,
         exitCode: result.code ?? -1,
         okCount: done?.okCount ?? null,
         fail: done?.fail ?? null,
-        run_dir: done?.run_dir || result.run_dir || '',
+        run_dir: runDir,
         params: ctx.mergedParams,
         ...(ctx.missingCreds.length > 0
             ? { missingCredentials: [...ctx.missingCreds] }
@@ -446,6 +460,22 @@ function finalizeRunResult(result, ctx) {
         eventsTail: redactSecrets(result.stdout.slice(-8000)),
         recipePath: ctx.path,
     };
+    if (ok && runDir && ctx.cwd?.trim()) {
+        const promoted = promoteRunDeliverables({
+            runDir,
+            cwd: ctx.cwd,
+            sessionId: ctx.sessionId,
+        });
+        if (promoted.outputs.length > 0) {
+            payload.workspaceOutputDir = promoted.workspaceDir || '';
+            payload.workspaceOutputs = promoted.outputs.map((o) => o.rel);
+            payload.workspaceOutputPaths = promoted.outputs.map((o) => o.path);
+            payload.workspaceOutputsMarked = promoted.marked;
+            payload.outputsHint =
+                '重要产物已同步到工作区 outputs/（不含 live-preview / executions 等过程物）；可在资料库查看';
+        }
+    }
+    return payload;
 }
 function liteEnvFrom(config, ensured, timeoutMs) {
     return {
@@ -466,6 +496,30 @@ function parseJsonObject(text) {
     catch {
         return undefined;
     }
+}
+/** Split tool inputPaths: JSON array string, or comma/newline-separated paths. */
+function parseInputPaths(raw) {
+    if (Array.isArray(raw)) {
+        return raw.map((p) => String(p || '').trim()).filter(Boolean);
+    }
+    const text = String(raw || '').trim();
+    if (!text)
+        return [];
+    if (text.startsWith('[')) {
+        try {
+            const arr = JSON.parse(text);
+            if (Array.isArray(arr)) {
+                return arr.map((p) => String(p || '').trim()).filter(Boolean);
+            }
+        }
+        catch {
+            /* fall through */
+        }
+    }
+    return text
+        .split(/[\n,;]+/u)
+        .map((p) => p.trim())
+        .filter(Boolean);
 }
 /**
  * Register webclaw tools and optional skill; optionally ensure lite at boot.
@@ -489,9 +543,39 @@ export function apply(ctx, config) {
             askUserQuestions = null;
         };
     });
+    // Track live provider/model (UI switches) for vision routing.
+    // MUST be a waterfall listener: always await next() and return the assembly.
+    // A bare observer that drops next() yields undefined → "Cannot read … 'variables'".
+    ctx.on('system-prompt/assemble', async (assembly, context, next) => {
+        const assembled = await next();
+        try {
+            const vars = (assembled?.variables || {});
+            const agentId = context && typeof context === 'object' && 'agent' in context
+                ? context.agent?.id
+                : undefined;
+            rememberAssembledModel(agentId != null ? String(agentId) : undefined, vars.provider, vars.model);
+        }
+        catch {
+            /* best-effort cache only */
+        }
+        return assembled ?? assembly;
+    });
     const log = {
         info: (msg, ...args) => ctx.logger.info(msg, ...args),
         warn: (msg, ...args) => ctx.logger.warn(msg, ...args),
+    };
+    const runOcrImage = async (lite, imagePath) => {
+        const result = await runLite(lite, ['scripts', 'ocr-image', '--input', imagePath]);
+        const textOut = `${result.stdout}\n${result.stderr}`.trim();
+        const parsed = parseJsonObject(result.stdout) ?? parseJsonObject(textOut);
+        if (parsed?.type === 'ocr_image' && parsed.ok !== false) {
+            return { ok: true, text: String(parsed.text || '') };
+        }
+        return {
+            ok: false,
+            text: '',
+            error: textOut.slice(0, 800) || 'ocr-image failed',
+        };
     };
     let lastEnsure;
     let accountsUi = null;
@@ -647,17 +731,25 @@ export function apply(ctx, config) {
                     return [{ type: 'text', text: v.form }];
                 }
                 if (v.needHuman) {
+                    const preferOcr = v.preferOcr === true;
+                    const ocrText = String(v.ocrText || '').trim();
+                    const injectImage = v.injectImage !== false && !preferOcr;
                     const blocks = [{
                             type: 'text',
                             text: [
-                                'webclaw_run: NEED_HUMAN（请立刻把验证码图给用户看，并索要字符）',
+                                preferOcr
+                                    ? 'webclaw_run: NEED_HUMAN（当前模型无读图；已走本地 OCR，请向用户确认验证码）'
+                                    : 'webclaw_run: NEED_HUMAN（请立刻把验证码图给用户看，并索要字符）',
                                 v.hint ? `hint: ${v.hint}` : '',
+                                ocrText ? `ocr: ${ocrText}` : '',
                                 v.image_path ? `image: ${v.image_path}` : '',
                                 v.run_dir ? `run_dir: ${v.run_dir}` : '',
-                                '下一步：展示图片 → 用户回字符 → webclaw_human_reply(mode=text, text=…, run_dir=…)',
+                                preferOcr
+                                    ? '下一步：把 OCR/路径给用户 → 用户回字符 → webclaw_human_reply(mode=text, text=…, run_dir=…)'
+                                    : '下一步：展示图片 → 用户回字符 → webclaw_human_reply(mode=text, text=…, run_dir=…)',
                             ].filter(Boolean).join('\n'),
                         }];
-                    if (v.image_path) {
+                    if (injectImage && v.image_path) {
                         try {
                             const bytes = readFileSync(v.image_path);
                             blocks.push({
@@ -723,15 +815,16 @@ export function apply(ctx, config) {
                         const hit = preview.params.find(x => x.name === p.name);
                         return hit ?? p;
                     });
-                // Seed from this-session human confirms so failure→patch retries
-                // do not re-interview fields the user already filled.
-                const previewParams = seedParamsFromSession(baseParams, overrides);
-                const needAsk = paramsNeedingAsk(previewParams, overrides);
+                const chatSid = agentSessionId(exec);
+                // Prefill from tool params / recipe defaults; only prior human
+                // confirms in THIS chat session skip the ask.
+                const previewParams = seedParamsFromSession(baseParams, overrides, chatSid);
+                const needAsk = paramsNeedingAsk(previewParams, chatSid);
                 if (askUserQuestions) {
                     let picked = previewParams;
                     if (needAsk.length === 0) {
-                        // All fields known from session and/or non-empty tool params.
-                        rememberConfirmedParams(previewParams);
+                        // Human already confirmed every field earlier in this chat.
+                        rememberConfirmedParams(previewParams, chatSid);
                     }
                     else {
                         try {
@@ -753,12 +846,12 @@ export function apply(ctx, config) {
                                 name: p.name,
                                 value: byName.get(p.name) ?? p.value,
                             }));
-                            rememberConfirmedParams(picked);
+                            rememberConfirmedParams(picked, chatSid);
                         }
                         catch {
                             // UI cancelled / unavailable — fall back to model-mediated form
                             // unless a prior needParams gate was armed + paramsConfirmed,
-                            // or session already filled every field.
+                            // or this chat already confirmed every field.
                             if (needAsk.length > 0 && (!confirmed || !consumeParamGate(gateKey))) {
                                 armParamGate(gateKey);
                                 return {
@@ -771,7 +864,7 @@ export function apply(ctx, config) {
                                 };
                             }
                             picked = previewParams;
-                            rememberConfirmedParams(picked);
+                            rememberConfirmedParams(picked, chatSid);
                         }
                     }
                     overrides = Object.fromEntries(picked.map(p => [p.name, p.value]));
@@ -789,8 +882,8 @@ export function apply(ctx, config) {
                     };
                 }
                 else {
-                    // Session / tool params already cover every field.
-                    rememberConfirmedParams(previewParams);
+                    // This chat already confirmed every field (retry / second call).
+                    rememberConfirmedParams(previewParams, chatSid);
                     overrides = Object.fromEntries(previewParams.map(p => [p.name, p.value]));
                 }
             }
@@ -829,10 +922,30 @@ export function apply(ctx, config) {
             if (result.run_dir) {
                 void publishLiveFocus(home, result.run_dir);
             }
+            const vision = await resolveVisionCapability(ctx, exec);
+            let captchaOcrText = '';
+            if (result.earlyHitl && result.needHuman && vision.preferOcr) {
+                const nh = result.needHuman;
+                const image = (typeof nh.inbox_image === 'string' && nh.inbox_image) ||
+                    (typeof nh.image_path === 'string' && nh.image_path) ||
+                    '';
+                if (image) {
+                    const ocr = await runOcrImage(lite, image);
+                    if (ocr.ok)
+                        captchaOcrText = ocr.text;
+                }
+            }
             const finalizeCtx = {
                 path,
                 mergedParams: paramsJson(merged.params),
                 missingCreds,
+                cwd: agentCwd(exec),
+                sessionId: agentSessionId(exec),
+                vision: {
+                    preferOcr: vision.preferOcr,
+                    supportsImage: vision.supportsImage,
+                },
+                captchaOcrText,
             };
             if (result.earlyHitl && result.needHuman) {
                 return resolveNeedHumanWithUser(result, {
@@ -1125,6 +1238,259 @@ export function apply(ctx, config) {
         },
     })), 'webclaw: tool webclaw_list_recipes');
     ctx.effect(() => ctx.tools.register(defineTool({
+        name: 'webclaw_script_list',
+        description: 'List local Rhai business scripts (Excel/file ops: e.g. 合并考勤数据). No browser. WeChat-local scripts are hidden. Prefer these over Python for tabular office work when a matching script exists.',
+        parameters: {},
+        output: {
+            schema: { type: 'object', additionalProperties: true },
+            render: (_args, value) => [
+                { type: 'text', text: JSON.stringify(value, null, 2) },
+            ],
+        },
+        async execute() {
+            const lite = await env(30_000);
+            const result = await runLite(lite, ['scripts', 'list']);
+            const text = `${result.stdout}\n${result.stderr}`.trim();
+            const parsed = parseJsonObject(result.stdout) ?? parseJsonObject(text);
+            if (parsed && (parsed.type === 'scripts' || Array.isArray(parsed.items))) {
+                return {
+                    ...parsed,
+                    ok: parsed.ok !== false && (result.code === 0 || result.code == null),
+                    exitCode: result.code ?? -1,
+                    binaryPath: lite.binaryPath,
+                };
+            }
+            return {
+                ok: result.code === 0,
+                type: 'scripts',
+                items: [],
+                exitCode: result.code ?? -1,
+                error: text.slice(0, 800) || 'scripts list failed',
+                binaryPath: lite.binaryPath,
+            };
+        },
+    })), 'webclaw: tool webclaw_script_list');
+    ctx.effect(() => ctx.tools.register(defineTool({
+        name: 'webclaw_script_run',
+        description: 'Run a local Rhai business script by name (no Chrome). Excel/file merges etc. WeChat-local scripts are refused. Pass args as free text after the name (e.g. 山西阳泉 2026-07). To reuse a prior browser download run, pass fromRunDir=<that run_dir> or inputPaths — NEVER shell Copy-Item/cp under %LOCALAPPDATA%/webclaw/runs or borrow another task’s downloads folder.',
+        parameters: {
+            name: {
+                type: 'string',
+                required: true,
+                description: 'Script name, e.g. 合并考勤数据',
+            },
+            args: {
+                type: 'string',
+                description: 'Arguments after the script name (space-separated free text)',
+            },
+            fromRunDir: {
+                type: 'string',
+                description: 'Prior webclaw run_dir whose downloads/files/documents should be staged (use this instead of shell-copying AppData runs)',
+            },
+            inputPaths: {
+                type: 'string',
+                description: 'File paths to stage into run files/ (comma / newline / JSON array). Prefer over copying between webclaw/runs folders.',
+            },
+        },
+        output: {
+            schema: { type: 'object', additionalProperties: true },
+            render: (_args, value) => [
+                { type: 'text', text: JSON.stringify(value, null, 2) },
+            ],
+        },
+        async execute(args, exec) {
+            const name = String(args.name || '').trim();
+            if (!name) {
+                return { ok: false, error: 'name is required' };
+            }
+            const argv = ['scripts', 'run', '--name', name];
+            const scriptArgs = String(args.args || '').trim();
+            if (scriptArgs) {
+                argv.push('--args', scriptArgs);
+            }
+            const fromRunDir = String(args.fromRunDir || '').trim();
+            if (fromRunDir) {
+                argv.push('--from-run-dir', fromRunDir);
+            }
+            const inputs = parseInputPaths(args.inputPaths);
+            for (const p of inputs) {
+                argv.push('--input', p);
+            }
+            // Scripts can be long (Excel); reuse run timeout.
+            const lite = await env();
+            const result = await runLite(lite, argv, { signal: exec.signal });
+            const text = `${result.stdout}\n${result.stderr}`.trim();
+            const parsed = parseJsonObject(result.stdout) ?? parseJsonObject(text);
+            const ok = !!parsed &&
+                parsed.type === 'script_done' &&
+                parsed.ok !== false &&
+                (result.code === 0 || result.code == null);
+            const runDir = (typeof parsed?.run_dir === 'string' && parsed.run_dir) ||
+                (typeof parsed?.runDir === 'string' && parsed.runDir) ||
+                '';
+            const payload = {
+                ...(parsed || {}),
+                ok,
+                exitCode: result.code ?? -1,
+                run_dir: runDir,
+                error: ok
+                    ? ''
+                    : (typeof parsed?.error === 'string' && parsed.error) ||
+                        text.slice(0, 1200) ||
+                        'script run failed',
+                binaryPath: lite.binaryPath,
+            };
+            if (ok && runDir) {
+                const promoted = promoteRunDeliverables({
+                    runDir,
+                    cwd: agentCwd(exec),
+                    sessionId: agentSessionId(exec),
+                });
+                if (promoted.outputs.length > 0) {
+                    payload.workspaceOutputDir = promoted.workspaceDir || '';
+                    payload.workspaceOutputs = promoted.outputs.map((o) => o.rel);
+                    payload.workspaceOutputPaths = promoted.outputs.map((o) => o.path);
+                    payload.workspaceOutputsMarked = promoted.marked;
+                    payload.outputsHint =
+                        '重要产物已同步到工作区 outputs/；可在资料库查看';
+                }
+            }
+            return payload;
+        },
+    })), 'webclaw: tool webclaw_script_run');
+    ctx.effect(() => ctx.tools.register(defineTool({
+        name: 'webclaw_read_table',
+        description: 'Peek any local .xlsx/.xls via embedded calamine (no Python, no xlrd/openpyxl). Returns sheet names, headers, and a sample of rows. Use first for unknown Excel files; then webclaw_script_run if a library script matches. Never pip-install Excel libs for a first look.',
+        parameters: {
+            path: {
+                type: 'string',
+                required: true,
+                description: 'Absolute or resolvable path to .xlsx / .xls',
+            },
+            sheet: {
+                type: 'string',
+                description: 'Sheet name or 0-based index (default first sheet)',
+            },
+            headerRow: {
+                type: 'number',
+                description: 'Header row index, 0-based (default 0)',
+            },
+            limit: {
+                type: 'number',
+                description: 'Max sample data rows (default 20, max 200)',
+            },
+            maxCols: {
+                type: 'number',
+                description: 'Max columns to include (default 40, max 100)',
+            },
+        },
+        output: {
+            schema: { type: 'object', additionalProperties: true },
+            render: (_args, value) => [
+                { type: 'text', text: JSON.stringify(value, null, 2) },
+            ],
+        },
+        async execute(args) {
+            const path = String(args.path || '').trim();
+            if (!path) {
+                return { ok: false, error: 'path is required' };
+            }
+            const argv = ['scripts', 'read-table', '--input', path];
+            const sheet = String(args.sheet || '').trim();
+            if (sheet) {
+                argv.push('--sheet', sheet);
+            }
+            if (typeof args.headerRow === 'number' && Number.isFinite(args.headerRow) && args.headerRow >= 0) {
+                argv.push('--header-row', String(Math.floor(args.headerRow)));
+            }
+            if (typeof args.limit === 'number' && Number.isFinite(args.limit) && args.limit > 0) {
+                argv.push('--limit', String(Math.floor(args.limit)));
+            }
+            if (typeof args.maxCols === 'number' && Number.isFinite(args.maxCols) && args.maxCols > 0) {
+                argv.push('--max-cols', String(Math.floor(args.maxCols)));
+            }
+            const lite = await env(60_000);
+            const result = await runLite(lite, argv);
+            const text = `${result.stdout}\n${result.stderr}`.trim();
+            const parsed = parseJsonObject(result.stdout) ?? parseJsonObject(text);
+            if (parsed && (parsed.type === 'table_peek' || Array.isArray(parsed.headers))) {
+                return {
+                    ...parsed,
+                    ok: parsed.ok !== false && (result.code === 0 || result.code == null),
+                    exitCode: result.code ?? -1,
+                    binaryPath: lite.binaryPath,
+                };
+            }
+            return {
+                ok: false,
+                type: 'table_peek',
+                exitCode: result.code ?? -1,
+                error: text.slice(0, 1200) || 'read-table failed',
+                binaryPath: lite.binaryPath,
+            };
+        },
+    })), 'webclaw: tool webclaw_read_table');
+    ctx.effect(() => ctx.tools.register(defineTool({
+        name: 'webclaw_vision_status',
+        description: 'Detect whether the CURRENT chat model accepts image input (DSH inputModalities). If preferOcr=true / supportsImage=false, do NOT feed images to the model — use webclaw_ocr_image instead. Call before handling user screenshots/attachments when unsure.',
+        parameters: {},
+        output: {
+            schema: { type: 'object', additionalProperties: true },
+            render: (_args, value) => [
+                { type: 'text', text: JSON.stringify(value, null, 2) },
+            ],
+        },
+        async execute(_args, exec) {
+            const vision = await resolveVisionCapability(ctx, exec);
+            return {
+                ok: true,
+                ...vision,
+                route: vision.preferOcr
+                    ? 'use webclaw_ocr_image → reason on text'
+                    : 'model can read images directly',
+            };
+        },
+    })), 'webclaw: tool webclaw_vision_status');
+    ctx.effect(() => ctx.tools.register(defineTool({
+        name: 'webclaw_ocr_image',
+        description: 'Local RapidOCR: image path → text (no multimodal model needed). Use when webclaw_vision_status.preferOcr is true, or any time the model cannot see images. First call may download ONNX models to the machine cache.',
+        parameters: {
+            path: {
+                type: 'string',
+                required: true,
+                description: 'Absolute or resolvable path to png/jpg/webp/…',
+            },
+        },
+        output: {
+            schema: { type: 'object', additionalProperties: true },
+            render: (_args, value) => [
+                { type: 'text', text: JSON.stringify(value, null, 2) },
+            ],
+        },
+        async execute(args, exec) {
+            const path = String(args.path || '').trim();
+            if (!path) {
+                return { ok: false, error: 'path is required' };
+            }
+            const vision = await resolveVisionCapability(ctx, exec);
+            // OCR can download models; allow a longer budget.
+            const lite = await env(180_000);
+            const ocr = await runOcrImage(lite, path);
+            return {
+                ok: ocr.ok,
+                type: 'ocr_image',
+                path,
+                text: ocr.text,
+                error: ocr.error || '',
+                vision,
+                routeHint: vision.preferOcr
+                    ? 'Text-only / unknown vision → use this OCR text; do not re-send the image to the model.'
+                    : 'Model supports images; OCR is optional fallback.',
+                binaryPath: lite.binaryPath,
+            };
+        },
+    })), 'webclaw: tool webclaw_ocr_image');
+    ctx.effect(() => ctx.tools.register(defineTool({
         name: 'webclaw_import',
         description: 'Copy an existing .webclaw (attachment path or any file) into the recipes library for durable replay/edit. Prefer this over treating chat attachments as the long-term store.',
         parameters: {
@@ -1307,6 +1673,8 @@ export function apply(ctx, config) {
                 path: args.run_dir?.trim() || '',
                 mergedParams: [],
                 missingCreds: [],
+                cwd: agentCwd(exec),
+                sessionId: agentSessionId(exec),
             });
         },
     })), 'webclaw: tool webclaw_human_reply');

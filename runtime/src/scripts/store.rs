@@ -323,6 +323,58 @@ pub fn list_scripts() -> Result<Vec<ScriptDef>, String> {
     Ok(db.scripts)
 }
 
+/// 微信本地资源相关脚本：不经 Host/`webclaw-lite scripts` 对外暴露（桌面「脚本…」菜谱仍可用）。
+pub fn is_wechat_local_script(s: &ScriptDef) -> bool {
+    const HIDDEN_IDS: &[&str] = &[
+        "builtin_ocr_road_clean_classify",
+        "builtin_watch_wechat_images",
+        "builtin_find_wechat_group",
+    ];
+    if HIDDEN_IDS.iter().any(|id| s.id == *id) {
+        return true;
+    }
+    let blob = format!("{} {}\n{}", s.name, s.description, s.script);
+    blob.contains("wechat_dat_decrypt")
+        || blob.contains("wechat_resolve_image_key")
+        || blob.contains("wechat_img_cache_dir")
+        || blob.contains("xwechat_files")
+        || blob.contains("微信账号根")
+        || blob.contains("微信本地")
+}
+
+/// 正文能否作为 Rhai 编译（语法层）。用于挡掉企业网关里的说明文/JS「伪脚本」。
+pub fn rhai_syntax_ok(source: &str) -> Result<(), String> {
+    let trimmed = source.trim_start();
+    if trimmed.is_empty() {
+        return Err("脚本正文为空".into());
+    }
+    // 常见误入库：自然语言 + markdown/JS，首字即炸（如「用 node 运行…」）
+    if trimmed.starts_with("用 ")
+        || trimmed.starts_with("请")
+            && (trimmed.contains("```") || trimmed.contains("node ") || trimmed.contains("python "))
+    {
+        return Err("正文不像 Rhai（更像说明/其它语言），请用内置业务脚本".into());
+    }
+    let mut engine = rhai::Engine::new();
+    engine.set_max_expr_depths(128, 64);
+    engine
+        .compile(source)
+        .map(|_| ())
+        .map_err(|e| format!("{e}"))
+}
+
+/// Host 可列/可跑：非微信本地，且 Rhai 语法可编译。
+pub fn is_host_runnable_script(s: &ScriptDef) -> bool {
+    !is_wechat_local_script(s) && rhai_syntax_ok(&s.script).is_ok()
+}
+
+/// Host / lite `scripts list` 可见脚本（排除微信本地资源类与非 Rhai 正文）。
+pub fn list_scripts_for_host() -> Result<Vec<ScriptDef>, String> {
+    let mut items = list_scripts()?;
+    items.retain(is_host_runnable_script);
+    Ok(items)
+}
+
 pub fn get_script(id: &str) -> Result<Option<ScriptDef>, String> {
     Ok(list_scripts()?.into_iter().find(|s| s.id == id))
 }
@@ -363,12 +415,18 @@ pub fn resolve_invocation(args: &str) -> Result<(ScriptDef, String), String> {
     if let Ok(Some(remote)) =
         crate::zhj_remote::resolve_script_prefer_remote(local.clone(), &name_hint)
     {
-        if args == remote.name || args.starts_with(&format!("{} ", remote.name)) {
+        let remote_ok = rhai_syntax_ok(&remote.script).is_ok();
+        if !remote_ok {
+            eprintln!(
+                "[scripts] 云端脚本「{}」不是可执行 Rhai，忽略云端正文（避免说明/JS 被当成脚本）",
+                remote.name
+            );
+            // 若本地同名也是这份坏正文，后面 resolve 仍会失败；Host list 已过滤。
+        } else if args == remote.name || args.starts_with(&format!("{} ", remote.name)) {
             let rest = args[remote.name.len()..].trim().to_string();
             return Ok((remote, rest));
-        }
-        // 云端名与本地最长匹配不一致时，仍优先云端名（若 args 以云端名开头）
-        if args.starts_with(&remote.name) {
+        } else if args.starts_with(&remote.name) {
+            // 云端名与本地最长匹配不一致时，仍优先云端名（若 args 以云端名开头）
             let rest = args[remote.name.len()..].trim().to_string();
             return Ok((remote, rest));
         }

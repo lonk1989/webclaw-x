@@ -1,11 +1,12 @@
 ---
 name: webclaw-lite
 description: >-
-  Local webclaw-lite browser RPA. DEFAULT: full recipe → webclaw_run once.
-  Prefab 参数…= → needParams: show editable table once (users usually must
-  change values);「用默认」only if user says so. No field-by-field interview.
-  Feishu/SSO: URL only, no password. Never invent accounts-set CLI / probe a
-  complete recipe / Playwright.
+  Local webclaw-lite browser RPA + Rhai script library. DEFAULT: full recipe →
+  webclaw_run once. Unknown Excel → webclaw_read_table (no Python/xlrd).
+  Images: webclaw_vision_status → if preferOcr use webclaw_ocr_image (never
+  feed images to text-only models). Known tabular → webclaw_script_*. Prefab
+  参数…= → needParams once. Feishu/SSO: URL only. Never invent accounts-set /
+  probe a complete recipe / Playwright.
 ---
 
 # webclaw-lite
@@ -25,24 +26,32 @@ Deterministic browser RPA driven by **Chinese natural-language recipes** stored 
 | Failure → short patch / re-run **same business params** | Reuse prior `params` + `paramsConfirmed=true`. Host keeps session-confirmed values — **do not** re-ask or blank fields | Second param interview; skip UI → empty `{{名}}` / empty `点击` |
 | Recipe has **`(点击取消?)`** / **`（试探？备选）`** | Keep literally. Runtime: try left of `?`/`？`; on miss run right side (or skip if empty) and continue | Strip parentheses; treat as comment; rewrite into unconditional `点击取消` without understanding probe |
 | Points at `recipes/*.webclaw` | Same as above | Probe “to be safe” |
+| 用户图片 / 截图 / 附件图 | `webclaw_vision_status`：`preferOcr` → `webclaw_ocr_image`；有读图则模型直接看 | 文本模型硬吃 image block 导致报错 |
+| 新的 / 未知 Excel 文件 | `webclaw_read_table(path)` 先看表头+样例行 | pip/xlrd/openpyxl/pandas 作为第一眼 |
+| Excel / 合并表格 / 考勤汇总 / 本地文件脚本 | `webclaw_script_list` → `webclaw_script_run(name, args)`；跨 run 产物用 `fromRunDir` / `inputPaths` | Python first; shell `Copy-Item` 跨 `%LOCALAPPDATA%/webclaw/runs`；找「另一个任务」目录手工并入 |
 | New unknown site, **no** complete recipe | Authoring: `webclaw_probe` ↔ short `webclaw_run` | Invent labels; Playwright |
 | Login / EHR / 飞书 SSO | `登录EHR系统` via `webclaw_run`. Vault needs **correct SSO URL** only (`…/login?sso=lark&…`). No password. | Ask password; paste `webclaw-lite.exe accounts set`; block because `has_password=false`; invent password form |
 
-**Rule of thumb:** User verbs → `webclaw_run`. Accounts tools are lookup-only. **One frozen recipe, one `webclaw_run`**. Failure budget = **one** patch (or one fix→freeze→rerun); then **stop and ask the user**. Eyes = `webclaw_probe` / `采集` only — never PowerShell, raw CDP WebSocket, or DIY DOM scripts.
+**Rule of thumb:** Browser verbs → `webclaw_run`. Local Rhai library → `webclaw_script_*`. Accounts tools are lookup-only. **One frozen recipe, one `webclaw_run`**. Failure budget = **one** patch (or one fix→freeze→rerun); then **stop and ask the user**. Eyes = `webclaw_probe` / `采集` only — never PowerShell, raw CDP WebSocket, or DIY DOM scripts.
 
 ## Modes
 
 | Mode | When | Tools |
 |------|------|-------|
 | **Replay (default)** | Full recipe / path / frozen file | `webclaw_run` (+ param confirm when needed) |
+| **Scripts** | Local Rhai Excel/file library (no browser) | `webclaw_read_table` → `webclaw_script_list` → `webclaw_script_run` |
 | **Authoring** | New / unknown site, no complete recipe | `webclaw_probe` ↔ short `webclaw_run` |
 | **Freeze** | Path works and should be kept | `webclaw_freeze` |
 
 ## Rules
 
-1. Prefer Host tools: `webclaw_status`, `webclaw_accounts_status`, `webclaw_inspect_params`, `webclaw_probe`, `webclaw_run`, `webclaw_freeze`, `webclaw_list_recipes`, `webclaw_import`, `webclaw_human_reply`, `webclaw_cancel`, `webclaw_set_display`, `webclaw_browser`
-2. **Forbidden**: Playwright / Puppeteer / CSS / invented verbs; raw CDP / WebSocket scripts to port 19222; PowerShell/JS “DOM mine” helpers; coordinate clicks outside recipe verbs; `Start-Process` / default browser / `open` / `xdg-open`; PowerShell / `taskkill` / `Stop-Process` / `kill` to manage Chrome
-3. Chat attachments are one-shot. Durable library: `webclaw_import` / `webclaw_freeze`
+1. Prefer Host tools: `webclaw_status`, `webclaw_vision_status`, `webclaw_ocr_image`, `webclaw_accounts_status`, `webclaw_inspect_params`, `webclaw_probe`, `webclaw_run`, `webclaw_read_table`, `webclaw_script_list`, `webclaw_script_run`, `webclaw_freeze`, `webclaw_list_recipes`, `webclaw_import`, `webclaw_human_reply`, `webclaw_cancel`, `webclaw_set_display`, `webclaw_browser`
+2. **Forbidden**: Playwright / Puppeteer / CSS / invented verbs; raw CDP / WebSocket scripts to port 19222; PowerShell/JS “DOM mine” helpers; coordinate clicks outside recipe verbs; `Start-Process` / default browser / `open` / `xdg-open`; PowerShell / `taskkill` / `Stop-Process` / `kill` to manage Chrome; **shell copy/move under `%LOCALAPPDATA%/webclaw/runs` or `~/.webclaw/runs`** (triggers danger-full-access; never “borrow” another task’s downloads)
+3. Chat attachments are one-shot. Durable library: `webclaw_import` / `webclaw_freeze`. Successful `webclaw_run` / `webclaw_script_run` also promotes important files (`downloads/` `documents/` `files/` / recipe screenshots) into workspace `outputs/webclaw-…/` for 资料库 — not live-preview / executions process junk.
+3b. **Excel**: Unknown file → `webclaw_read_table(path)` (embedded calamine; **never** pip xlrd/openpyxl for a first look). Known job → `webclaw_script_list` → `webclaw_script_run`.
+3c. **Cross-run files (download then script)**: Prefer one recipe that downloads then runs the script in the **same** `run_dir`. If already split: `webclaw_script_run(..., fromRunDir=<prior run_dir>)` or `inputPaths` to the xls/xlsx — **never** PowerShell/`Copy-Item`/`cp` between `webclaw/runs/.../downloads`. Do not dig other tasks’ AppData run folders.
+3c2. **Scripts**: Only `webclaw_script_run` names from `webclaw_script_list`. Never run「测试脚本」/markdown/JS probes — those are not Rhai and yield `Syntax error: Unexpected '用'`. For 考勤合并 use exact name `合并考勤数据`.
+3d. **Images / no multimodal**: `webclaw_vision_status` first. If `preferOcr` / `supportsImage=false` → `webclaw_ocr_image(path)` and reason on **text only**. If `supportsImage=true` → model may read the image. Captcha HITL auto-OCRs when preferOcr.
 4. **Install**: Windows / macOS (arm64) plugin auto-downloads lite. Intel Mac / Linux: build `runtime/` or set `binaryPath`. Gatekeeper: `xattr -d com.apple.quarantine ~/.webclaw/bin/webclaw-lite`
 5. Never turn a long user recipe into multi-round probe
 6. **参数**: Prefab values are usually wrong for this run — Host asks once; let the user change them, then run. Do **not** verbally ask field-by-field. Do **not** suggest「用默认」unless the user asks. On failure→patch / re-run: **reuse** confirmed `params` (`paramsConfirmed=true`) — never re-interview or clear them.

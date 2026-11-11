@@ -11,13 +11,26 @@ pub struct ScriptTable {
 }
 
 pub fn read_table(path: &Path) -> Result<ScriptTable, Box<EvalAltResult>> {
+    read_table_sheet(path, None)
+}
+
+/// 读取指定工作表（`sheet` 为 0 基序号或表名；`None` = 第一张）。
+pub fn read_table_sheet(
+    path: &Path,
+    sheet: Option<&str>,
+) -> Result<ScriptTable, Box<EvalAltResult>> {
     let path = super::excel_compat::resolve_excel_path(path);
     let mut workbook = open_workbook_auto(&path).map_err(|e| {
         runtime_err(format!("读取表格失败 {}: {e}", path.display()))
     })?;
+    let sheet_names = workbook.sheet_names().to_vec();
+    if sheet_names.is_empty() {
+        return Err(runtime_err("表格无工作表".into()));
+    }
+    let idx = resolve_sheet_index(&sheet_names, sheet)?;
     let range = workbook
-        .worksheet_range_at(0)
-        .ok_or_else(|| runtime_err("表格无工作表".into()))?
+        .worksheet_range_at(idx)
+        .ok_or_else(|| runtime_err(format!("工作表不存在: index={idx}")))?
         .map_err(|e| runtime_err(format!("读取工作表失败: {e}")))?;
 
     let mut rows = Vec::new();
@@ -28,6 +41,145 @@ pub fn read_table(path: &Path) -> Result<ScriptTable, Box<EvalAltResult>> {
     Ok(ScriptTable {
         rows: Rc::new(rows),
     })
+}
+
+fn resolve_sheet_index(names: &[String], sheet: Option<&str>) -> Result<usize, Box<EvalAltResult>> {
+    let Some(raw) = sheet.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(0);
+    };
+    if let Ok(n) = raw.parse::<i64>() {
+        if n < 0 || n as usize >= names.len() {
+            return Err(runtime_err(format!(
+                "工作表序号越界: {n}（共 {} 张）",
+                names.len()
+            )));
+        }
+        return Ok(n as usize);
+    }
+    names
+        .iter()
+        .position(|n| n == raw)
+        .ok_or_else(|| runtime_err(format!("未找到工作表「{raw}」，可选: {}", names.join(", "))))
+}
+
+/// Host/CLI 通用读表预览（不依赖 Python / xlrd）。
+#[derive(Debug, Clone)]
+pub struct TablePeekOptions {
+    pub sheet: Option<String>,
+    pub header_row: usize,
+    pub limit: usize,
+    pub max_cols: usize,
+}
+
+impl Default for TablePeekOptions {
+    fn default() -> Self {
+        Self {
+            sheet: None,
+            header_row: 0,
+            limit: 20,
+            max_cols: 40,
+        }
+    }
+}
+
+pub fn peek_table_json(
+    path: &Path,
+    opts: TablePeekOptions,
+) -> Result<serde_json::Value, String> {
+    let resolved = super::excel_compat::resolve_excel_path(path);
+    if !resolved.is_file() {
+        return Err(format!("文件不存在: {}", path.display()));
+    }
+    let mut workbook = open_workbook_auto(&resolved)
+        .map_err(|e| format!("读取表格失败 {}: {e}", resolved.display()))?;
+    let sheet_names = workbook.sheet_names().to_vec();
+    if sheet_names.is_empty() {
+        return Err("表格无工作表".into());
+    }
+    let sheet_idx = resolve_sheet_index(&sheet_names, opts.sheet.as_deref())
+        .map_err(|e| e.to_string())?;
+    let sheet_name = sheet_names
+        .get(sheet_idx)
+        .cloned()
+        .unwrap_or_else(|| format!("sheet{sheet_idx}"));
+    let range = workbook
+        .worksheet_range_at(sheet_idx)
+        .ok_or_else(|| format!("工作表不存在: {sheet_name}"))?
+        .map_err(|e| format!("读取工作表失败: {e}"))?;
+
+    let header_row = opts.header_row;
+    let max_cols = opts.max_cols.max(1);
+    let limit = opts.limit.max(1);
+
+    let mut all_rows: Vec<Vec<String>> = Vec::new();
+    let mut widest = 0usize;
+    for row in range.rows() {
+        let cells: Vec<String> = row
+            .iter()
+            .map(|cell| to_str(cell_to_dynamic(cell)).to_string())
+            .collect();
+        widest = widest.max(cells.len());
+        all_rows.push(cells);
+    }
+    let col_count = widest.min(max_cols);
+    let row_count = all_rows.len();
+
+    let headers: Vec<String> = if let Some(row) = all_rows.get(header_row) {
+        let mut h: Vec<String> = row.iter().take(col_count).cloned().collect();
+        while h.len() < col_count {
+            h.push(String::new());
+        }
+        // Empty header cells → ColN for Agent convenience
+        for (i, cell) in h.iter_mut().enumerate() {
+            if cell.trim().is_empty() {
+                *cell = format!("Col{}", i + 1);
+            }
+        }
+        h
+    } else {
+        (0..col_count).map(|i| format!("Col{}", i + 1)).collect()
+    };
+
+    let data_start = header_row.saturating_add(1);
+    let mut sample: Vec<serde_json::Value> = Vec::new();
+    let mut truncated = false;
+    for (offset, row) in all_rows.iter().skip(data_start).enumerate() {
+        if sample.len() >= limit {
+            truncated = true;
+            break;
+        }
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "_row".into(),
+            serde_json::Value::from((data_start + offset) as u64),
+        );
+        for (i, key) in headers.iter().enumerate() {
+            let val = row.get(i).cloned().unwrap_or_default();
+            obj.insert(key.clone(), serde_json::Value::String(val));
+        }
+        sample.push(serde_json::Value::Object(obj));
+    }
+    if row_count > data_start + sample.len() {
+        truncated = true;
+    }
+
+    Ok(serde_json::json!({
+        "type": "table_peek",
+        "ok": true,
+        "path": resolved.to_string_lossy(),
+        "sheets": sheet_names,
+        "sheet": sheet_name,
+        "sheetIndex": sheet_idx,
+        "headerRow": header_row,
+        "rowCount": row_count,
+        "colCount": col_count,
+        "colsTruncated": widest > col_count,
+        "headers": headers,
+        "sample": sample,
+        "sampleLimit": limit,
+        "truncated": truncated,
+        "hint": "通用读表（calamine，无需 Python/xlrd）。业务处理再用 webclaw_script_run。",
+    }))
 }
 
 /// 部分中文 .xls（MES 月报）会被 calamine 把 UTF-16LE 误读成 Latin-1（夹杂 \\0 或高低字节对）。

@@ -1183,17 +1183,90 @@ pub async fn fetch_to_session(
     }
 }
 
-/// Content-Disposition 含非 UTF-8 字节时 HeaderValue::to_str 会失败；按 latin1 再解析一次
+/// Content-Disposition 常含非 ASCII（中文 filename=）。`HeaderValue::to_str` 仅接受可见 ASCII，
+/// 旧逻辑把原始字节当 Latin-1 拼串 → UTF-8 中文变成 `å­ç­…` 乱码。
+/// 优先按 UTF-8 解；失败再 Latin-1，并对结果做 mojibake 恢复。
 fn try_filename_from_header_value(val: &reqwest::header::HeaderValue) -> Result<String, ()> {
     if let Ok(s) = val.to_str() {
         return filename_from_content_disposition_str(s).ok_or(());
     }
-    let raw = val
-        .as_bytes()
-        .iter()
-        .map(|&b| b as char)
-        .collect::<String>();
-    filename_from_content_disposition_str(&raw).ok_or(())
+    let bytes = val.as_bytes();
+    if let Ok(utf8) = std::str::from_utf8(bytes) {
+        if let Some(n) = filename_from_content_disposition_str(utf8) {
+            return Ok(n);
+        }
+    }
+    let latin1: String = bytes.iter().map(|&b| b as char).collect();
+    let recovered = recover_utf8_mojibake_filename(&latin1);
+    filename_from_content_disposition_str(&recovered)
+        .or_else(|| filename_from_content_disposition_str(&latin1))
+        .ok_or(())
+}
+
+/// 恢复「UTF-8 字节被当成 Latin-1 / Windows-1252 解码」的文件名乱码。
+/// 例：`å­ç­æç­è®°å½.xls` → `加班排班记录.xls`
+pub fn recover_utf8_mojibake_filename(s: &str) -> String {
+    let Some(bytes) = s.chars().map(windows_1252_or_latin1_byte).collect::<Option<Vec<u8>>>()
+    else {
+        return s.to_string();
+    };
+    if bytes.len() < 2 || !bytes.iter().any(|&b| b >= 0x80) {
+        return s.to_string();
+    }
+    match String::from_utf8(bytes) {
+        Ok(utf8) if filename_mojibake_improved(&utf8, s) => utf8,
+        _ => s.to_string(),
+    }
+}
+
+fn filename_mojibake_improved(recovered: &str, original: &str) -> bool {
+    let cjk = |t: &str| {
+        t.chars()
+            .filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c))
+            .count()
+    };
+    let rc = cjk(recovered);
+    let oc = cjk(original);
+    // 还原出更多汉字，或原文几乎无汉字而还原有效
+    rc > oc || (oc == 0 && rc > 0) || (rc > 0 && recovered.len() < original.len())
+}
+
+fn windows_1252_or_latin1_byte(c: char) -> Option<u8> {
+    let n = u32::from(c);
+    if n <= 0xFF {
+        return Some(n as u8);
+    }
+    // Windows-1252 在 0x80–0x9F 映射到 Unicode 字母，需还原回字节
+    Some(match c {
+        '€' => 0x80,
+        '‚' => 0x82,
+        'ƒ' => 0x83,
+        '„' => 0x84,
+        '…' => 0x85,
+        '†' => 0x86,
+        '‡' => 0x87,
+        'ˆ' => 0x88,
+        '‰' => 0x89,
+        'Š' => 0x8A,
+        '‹' => 0x8B,
+        'Œ' => 0x8C,
+        'Ž' => 0x8E,
+        '‘' => 0x91,
+        '’' => 0x92,
+        '“' => 0x93,
+        '”' => 0x94,
+        '•' => 0x95,
+        '–' => 0x96,
+        '—' => 0x97,
+        '˜' => 0x98,
+        '™' => 0x99,
+        'š' => 0x9A,
+        '›' => 0x9B,
+        'œ' => 0x9C,
+        'ž' => 0x9E,
+        'Ÿ' => 0x9F,
+        _ => return None,
+    })
 }
 
 fn replay_needs_full_request(r: &crate::browser_network::DownloadReplayRequest) -> bool {
@@ -2135,6 +2208,8 @@ fn filename_from_content_disposition_str(raw: &str) -> Option<String> {
     if raw.is_empty() {
         return None;
     }
+    // Header 整串也可能是 UTF-8 被 Latin-1/1252 误读
+    let raw = recover_utf8_mojibake_filename(raw);
     let mut utf8_name: Option<String> = None;
     let mut plain_name: Option<String> = None;
     for token in raw.split(';') {
@@ -2154,7 +2229,7 @@ fn filename_from_content_disposition_str(raw: &str) -> Option<String> {
                 .strip_prefix("UTF-8''")
                 .or_else(|| v.strip_prefix("utf-8''"))
                 .unwrap_or(v);
-            let name = decode_filename_component(encoded);
+            let name = recover_utf8_mojibake_filename(&decode_filename_component(encoded));
             if !name.is_empty() {
                 utf8_name = Some(name);
             }
@@ -2163,7 +2238,7 @@ fn filename_from_content_disposition_str(raw: &str) -> Option<String> {
                 .split_once('=')
                 .map(|(_, v)| v.trim().trim_matches('"').trim_matches('\''))
                 .unwrap_or("");
-            let name = decode_filename_component(v);
+            let name = recover_utf8_mojibake_filename(&decode_filename_component(v));
             if !name.is_empty() {
                 plain_name = Some(name);
             }
@@ -2195,8 +2270,8 @@ fn fallback_filename_from_ct(ct: &str) -> String {
 }
 
 fn filename_from_content_disposition(headers: &reqwest::header::HeaderMap) -> Option<String> {
-    let raw = headers.get(CONTENT_DISPOSITION)?.to_str().ok()?;
-    filename_from_content_disposition_str(raw)
+    let raw = headers.get(CONTENT_DISPOSITION)?;
+    try_filename_from_header_value(raw).ok()
 }
 
 fn fallback_filename(headers: &reqwest::header::HeaderMap) -> String {
@@ -2225,10 +2300,11 @@ fn fallback_filename(headers: &reqwest::header::HeaderMap) -> String {
 }
 
 fn sanitize_download_filename(name: &str) -> String {
-    let base = Path::new(name)
+    let recovered = recover_utf8_mojibake_filename(name);
+    let base = Path::new(&recovered)
         .file_name()
         .and_then(|s| s.to_str())
-        .unwrap_or(name);
+        .unwrap_or(recovered.as_str());
     base.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' || c > '\u{007f}' {
@@ -2265,6 +2341,47 @@ mod tests {
         let name = decode_filename_component(raw);
         assert!(name.contains("休假台账"));
         assert!(name.ends_with(".xlsx"));
+    }
+
+    #[test]
+    fn recovers_utf8_as_latin1_mojibake_filenames() {
+        let leave_m: String = "请假登记.xls".as_bytes().iter().map(|&b| b as char).collect();
+        let ot_m: String = "加班排班记录.xls"
+            .as_bytes()
+            .iter()
+            .map(|&b| b as char)
+            .collect();
+        assert_eq!(recover_utf8_mojibake_filename(&leave_m), "请假登记.xls");
+        assert_eq!(recover_utf8_mojibake_filename(&ot_m), "加班排班记录.xls");
+        // Already-correct Chinese must stay unchanged
+        assert_eq!(
+            recover_utf8_mojibake_filename("考勤月报_山西阳泉.xlsx"),
+            "考勤月报_山西阳泉.xlsx"
+        );
+    }
+
+    #[test]
+    fn parses_content_disposition_with_raw_utf8_filename() {
+        // Simulate HeaderValue latin1 mis-decode of: attachment; filename="请假登记.xls"
+        let good = "attachment; filename=\"请假登记.xls\"";
+        assert_eq!(
+            filename_from_content_disposition_str(good).as_deref(),
+            Some("请假登记.xls")
+        );
+        let mojibake_body: String = "请假登记.xls".as_bytes().iter().map(|&b| b as char).collect();
+        let bad = format!("attachment; filename=\"{mojibake_body}\"");
+        assert_eq!(
+            filename_from_content_disposition_str(&bad).as_deref(),
+            Some("请假登记.xls")
+        );
+    }
+
+    #[test]
+    fn try_filename_from_header_value_prefers_utf8_bytes() {
+        let raw = "attachment; filename=\"加班排班记录.xls\"";
+        let val = reqwest::header::HeaderValue::from_bytes(raw.as_bytes()).unwrap();
+        let name = try_filename_from_header_value(&val).expect("parse");
+        assert_eq!(name, "加班排班记录.xls");
     }
 
     #[test]

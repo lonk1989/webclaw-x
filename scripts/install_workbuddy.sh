@@ -5,7 +5,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/lonk1989/webclaw-x/main/scripts/install_workbuddy.sh | bash
 #
 # Env:
-#   WEBCLAW_VERSION=0.2.2|latest
+#   WEBCLAW_VERSION=0.2.3|latest
 #   WEBCLAW_HOME=~/.webclaw
 #   WEBCLAW_HOSTS=app.example.com,login.example.com
 #   WEBCLAW_NO_MERGE=1
@@ -15,7 +15,7 @@
 set -euo pipefail
 
 REPO="lonk1989/webclaw-x"
-VERSION="${WEBCLAW_VERSION:-0.2.2}"
+VERSION="${WEBCLAW_VERSION:-0.2.3}"
 VER="${VERSION#v}"
 if [ "$VER" = "latest" ]; then
   TAG="latest"
@@ -74,7 +74,7 @@ oss_dir() {
       return 0
     fi
   fi
-  echo "$DEFAULT_OSS_ROOT/v0.2.2"
+  echo "$DEFAULT_OSS_ROOT/v0.2.3"
 }
 
 # Try URL list; write to dest on first success.
@@ -238,7 +238,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 [project]
 name = "webclaw-x"
-version = "0.2.2"
+version = "0.2.3"
 requires-python = ">=3.10"
 dependencies = ["mcp>=1.0,<2.0", "anyio>=4.0"]
 [tool.setuptools.packages.find]

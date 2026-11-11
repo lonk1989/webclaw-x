@@ -58,3 +58,7 @@ export declare function resolveRecipePath(config: RecipesConfig, recipePath: str
 export declare function agentCwd(exec: {
     agent?: unknown;
 }): string | undefined;
+/** Best-effort chat session id for library artifact marks. */
+export declare function agentSessionId(exec: {
+    agent?: unknown;
+}): string | undefined;

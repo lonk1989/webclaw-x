@@ -1655,10 +1655,12 @@ fn sanitize_filename(s: &str) -> String {
 
 /// 下载文件名：保留中文等 Unicode，仅去掉路径非法字符。
 fn sanitize_download_filename_for_disk(s: &str) -> String {
-    let base = Path::new(s)
+    // 兜底：CDP/历史路径若已是 UTF-8→1252 乱码，落盘前恢复中文名
+    let recovered = crate::client_download::recover_utf8_mojibake_filename(s);
+    let base = Path::new(&recovered)
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or(s);
+        .unwrap_or(recovered.as_str());
     let mut out = String::new();
     for c in base.chars().take(120) {
         if matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
@@ -1689,6 +1691,18 @@ mod sanitize_tests {
         assert_eq!(name2, "考勤月报_科技事业部_2026-05-01.xlsx");
         let name3 = sanitize_download_filename_for_disk("2026-06月报.xls");
         assert_eq!(name3, "2026-06月报.xls");
+    }
+
+    #[test]
+    fn recovers_utf8_mojibake_download_filename() {
+        let leave: String = "请假登记.xls".as_bytes().iter().map(|&b| b as char).collect();
+        let ot: String = "加班排班记录.xls"
+            .as_bytes()
+            .iter()
+            .map(|&b| b as char)
+            .collect();
+        assert_eq!(sanitize_download_filename_for_disk(&leave), "请假登记.xls");
+        assert_eq!(sanitize_download_filename_for_disk(&ot), "加班排班记录.xls");
     }
 }
 
