@@ -1,6 +1,6 @@
 [package]
 name = "webclaw"
-version = "0.1.23"
+version = "0.1.24"
 description = "Deterministic browser RPA driven by natural-language recipes (zh/en verbs)"
 authors = ["webclaw contributors"]
 edition = "2021"

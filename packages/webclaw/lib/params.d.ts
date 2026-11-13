@@ -52,5 +52,21 @@ export declare function extractMustacheParams(content: string): string[];
  * declared `参数名=值`, remaining `{{名}}`, and explicit tool `params` keys.
  */
 export declare function collectConfirmableParams(content: string, overrides?: Record<string, string> | null): RecipeParamKv[];
+export interface ParamEdit {
+    readonly name: string;
+    /** Value the body may still carry literally (recipe / form default). */
+    readonly from: string;
+    /** Value the human confirmed. */
+    readonly to: string;
+}
+/**
+ * Point literal defaults in step bodies at the confirmed value, for names the
+ * recipe never references as `{{名}}` (skill authors / models that expanded
+ * `参数月份=七月` into `点击七月`). Without this a form edit cannot reach the body.
+ */
+export declare function rebindExpandedDefaults(content: string, edits: readonly ParamEdit[]): {
+    content: string;
+    rebound: string[];
+};
 /** Parse tool `params` arg: JSON object string or already-plain record. */
 export declare function parseParamsArg(raw: unknown): Record<string, string> | undefined;

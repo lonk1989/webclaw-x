@@ -75,6 +75,8 @@ export function WebclawRunToolview({
   const [lines, setLines] = useState<string[]>([])
   const [baseOk, setBaseOk] = useState(true)
   const [imgUrl, setImgUrl] = useState('')
+  /** Host clears live markers before param confirm; a runDir means lite has started. */
+  const [started, setStarted] = useState(false)
   const scroller = useRef<HTMLDivElement | null>(null)
   const openedRunDir = useRef('')
   const pending = phase === 'preparing' || phase === 'start'
@@ -110,6 +112,7 @@ export function WebclawRunToolview({
         }
         const runDir =
           j.runDir?.trim() || focusJson.focus?.runDir?.trim() || ''
+        if (!cancelled) setStarted(runDir !== '')
         // Session-scoped tool card is the most reliable moment to open the right rail.
         if (runDir && runDir !== openedRunDir.current) {
           openedRunDir.current = runDir
@@ -182,7 +185,13 @@ export function WebclawRunToolview({
     if (extracted.length > 0) setLines(extracted)
   }, [pending, block])
 
-  const header = pending
+  // Pending before lite starts = Host is still confirming params: no preview yet,
+  // so the param form is the only thing asking for attention.
+  const awaitingStart = pending && !started
+
+  const header = awaitingStart
+    ? t('waitingStart')
+    : pending
     ? t('pending')
     : block.isError
       ? t('failed')
@@ -211,12 +220,13 @@ export function WebclawRunToolview({
         }}
       >
         <span>{header}</span>
-        {pending ? (
+        {pending && !awaitingStart ? (
           <span style={{ opacity: 0.55, fontWeight: 400 }}>
             {baseOk ? 'live' : t('offline')}
           </span>
         ) : null}
       </div>
+      {awaitingStart ? null : (<>
       <div
         style={{
           padding: '8px 10px',
@@ -253,6 +263,7 @@ export function WebclawRunToolview({
           ))
         )}
       </div>
+      </>)}
     </div>
   )
 }

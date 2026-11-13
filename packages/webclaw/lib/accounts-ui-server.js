@@ -401,7 +401,11 @@ export async function startAccountsUiServer(options) {
                 // Always reconcile with disk: publishLiveFocus writes the file first;
                 // if the follow-up POST fails, a stale in-memory focus would hide new runs
                 // until Host restart (exactly the "sidebar only after restart" bug).
-                sendJson(res, 200, { ok: true, focus: syncLatestFocus(options.home) });
+                sendJson(res, 200, {
+                    ok: true,
+                    focus: syncLatestFocus(options.home),
+                    autoOpen: options.liveAutoOpen === true,
+                });
                 return;
             }
             if (req.method === 'POST' && url.pathname === '/api/live/focus') {

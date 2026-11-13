@@ -14,7 +14,7 @@ import { cancelActiveHitl, hasActiveHitl, parseDoneEvent, resumeActiveHitl, runL
 import { agentCwd, agentSessionId, freezeRecipe, importRecipe, listRecipes, resolveRecipePath, } from './recipes.js';
 import { promoteRunDeliverables } from './promote-outputs.js';
 import { rememberAssembledModel, resolveVisionCapability } from './model-vision.js';
-import { applyParamOverrides, collectConfirmableParams, extractRecipeParams, parseParamsArg, } from './params.js';
+import { applyParamOverrides, collectConfirmableParams, extractRecipeParams, parseParamsArg, rebindExpandedDefaults, } from './params.js';
 import { redactSecrets } from './redact.js';
 import { sanitizeWebclawRecipe } from './url-coerce.js';
 import { ACCOUNTS_UI_DEFAULT_PORT, startAccountsUiServer, } from './accounts-ui-server.js';
@@ -48,6 +48,7 @@ export const Config = z.object({
         .default([]),
     accountsUi: z.boolean().default(true),
     accountsUiPort: z.number().min(1).max(65_535).default(ACCOUNTS_UI_DEFAULT_PORT),
+    liveAutoOpen: z.boolean().default(false),
 });
 /**
  * Prefill local vault site entries from deploy config (url + optional credentials).
@@ -213,33 +214,53 @@ function chatSessionKey(sessionId) {
     // No chat id → isolate by process so we never treat Host-wide as "confirmed".
     return id && id !== '' ? `chat:${id}` : `anon:${process.pid}`;
 }
-function touchSessionParams(sessionId) {
+function touchSessionBag(sessionId) {
     const key = chatSessionKey(sessionId);
     const cutoff = Date.now() - SESSION_PARAM_TTL_MS;
     for (const [k, bag] of confirmedByChatSession) {
         if (bag.at < cutoff)
             confirmedByChatSession.delete(k);
     }
-    const bag = confirmedByChatSession.get(key);
-    return bag?.byName ?? new Map();
+    return confirmedByChatSession.get(key);
 }
-function rememberConfirmedParams(params, sessionId) {
+function touchSessionParams(sessionId) {
+    return touchSessionBag(sessionId)?.byName ?? new Map();
+}
+function sessionOfferedParams(sessionId) {
+    return touchSessionBag(sessionId)?.offered ?? new Map();
+}
+function rememberConfirmedParams(params, sessionId, offered) {
     const key = chatSessionKey(sessionId);
-    const byName = new Map(touchSessionParams(sessionId));
+    const prev = touchSessionBag(sessionId);
+    const byName = new Map(prev?.byName);
+    const offeredByName = new Map(prev?.offered);
     for (const p of params) {
         const name = p.name.trim();
         if (!name)
             continue;
         byName.set(name, p.value);
     }
-    confirmedByChatSession.set(key, { at: Date.now(), byName });
+    for (const p of offered ?? []) {
+        const name = p.name.trim();
+        if (!name || offeredByName.has(name))
+            continue;
+        offeredByName.set(name, p.value);
+    }
+    confirmedByChatSession.set(key, { at: Date.now(), byName, offered: offeredByName });
 }
 function seedParamsFromSession(params, overrides, sessionId) {
     const confirmed = touchSessionParams(sessionId);
+    const offered = sessionOfferedParams(sessionId);
     return params.map(p => {
         const fromOverride = overrides?.[p.name];
         if (fromOverride != null && String(fromOverride).trim() !== '') {
-            return { name: p.name, value: String(fromOverride) };
+            const value = String(fromOverride);
+            const human = confirmed.get(p.name);
+            // Retries echo the skill default the human already changed — keep the edit.
+            if (human !== undefined && value !== human && value === offered.get(p.name)) {
+                return { name: p.name, value: human };
+            }
+            return { name: p.name, value };
         }
         if (confirmed.has(p.name)) {
             return { name: p.name, value: confirmed.get(p.name) ?? '' };
@@ -372,8 +393,9 @@ async function resolveNeedHumanWithUser(result, opts) {
         });
         if (!continued) {
             return {
-                ok: true,
-                note: 'captcha reply written; parked run already finished',
+                ok: false,
+                code: 'HITL_RUN_GONE',
+                error: '验证码已写入，但等待人工期间运行已结束（被中止或超时），后续步骤没有执行。请据实告知用户并整段重跑 webclaw_run，不要当作成功。',
                 run_dir: runDir,
                 recipePath: opts.finalizeCtx.path,
                 params: opts.finalizeCtx.mergedParams,
@@ -600,6 +622,7 @@ export function apply(ctx, config) {
         accountsUi = await startAccountsUiServer({
             enabled: config.accountsUi,
             preferredPort: config.accountsUiPort || ACCOUNTS_UI_DEFAULT_PORT,
+            liveAutoOpen: config.liveAutoOpen,
             getEnv: async () => liteEnvFrom(config, ensured, 60_000),
             home: ensured.webclawHome,
             binaryPath: ensured.binaryPath,
@@ -767,12 +790,18 @@ export function apply(ctx, config) {
                     }
                     return blocks;
                 }
+                const usedParams = (v.params ?? []).filter(p => p.name.trim());
                 const lines = [
                     v.cancelled
                         ? 'webclaw_run: cancelled'
                         : v.ok
                             ? 'webclaw_run: ok'
                             : 'webclaw_run: failed',
+                    // Logs mask typed values (山***); models then "correct" the user's
+                    // confirmed values back to skill defaults unless told explicitly.
+                    usedParams.length > 0
+                        ? `params（本次实际运行值，已经用户确认；失败时不要改回技能默认值，确需改值先问用户）: ${usedParams.map(p => `${p.name}=${p.value}`).join('，')}`
+                        : '',
                     v.recipePath ? `recipePath: ${v.recipePath}` : '',
                     v.run_dir ? `run_dir: ${v.run_dir}` : '',
                     v.error ? `error: ${v.error}` : '',
@@ -791,6 +820,15 @@ export function apply(ctx, config) {
             if (!inline && !pathArg) {
                 throw new Error('recipe or recipePath is required');
             }
+            // The previous run's preview must not show while the user confirms params;
+            // the tool card reveals the preview once lite publishes the new run_dir.
+            try {
+                clearLiveFocus(resolveWebclawHome({ webclawHome: config.webclawHome }));
+                accountsUi?.clearFocus();
+            }
+            catch {
+                /* best-effort */
+            }
             const cwd = agentCwd(exec);
             const sourcePath = pathArg
                 ? resolveRecipePath(recipesCfg(config), pathArg, cwd)
@@ -801,6 +839,7 @@ export function apply(ctx, config) {
             const declared = extractRecipeParams(rawContent);
             // Tool schema may deliver object or string; parseParamsArg accepts both.
             let overrides = parseParamsArg(args.params);
+            const modelPrefill = overrides;
             const confirmed = args.paramsConfirmed === true;
             // Gate on 参数…= / {{名}} / tool params — not only explicit 参数 lines
             // (models often expand defaults into the body and skip confirm).
@@ -846,7 +885,7 @@ export function apply(ctx, config) {
                                 name: p.name,
                                 value: byName.get(p.name) ?? p.value,
                             }));
-                            rememberConfirmedParams(picked, chatSid);
+                            rememberConfirmedParams(picked, chatSid, previewParams);
                         }
                         catch {
                             // UI cancelled / unavailable — fall back to model-mediated form
@@ -854,6 +893,7 @@ export function apply(ctx, config) {
                             // or this chat already confirmed every field.
                             if (needAsk.length > 0 && (!confirmed || !consumeParamGate(gateKey))) {
                                 armParamGate(gateKey);
+                                rememberConfirmedParams([], chatSid, previewParams);
                                 return {
                                     ok: false,
                                     needParams: true,
@@ -872,6 +912,7 @@ export function apply(ctx, config) {
                 }
                 else if (needAsk.length > 0 && (!confirmed || !consumeParamGate(gateKey))) {
                     armParamGate(gateKey);
+                    rememberConfirmedParams([], chatSid, previewParams);
                     return {
                         ok: false,
                         needParams: true,
@@ -887,7 +928,16 @@ export function apply(ctx, config) {
                     overrides = Object.fromEntries(previewParams.map(p => [p.name, p.value]));
                 }
             }
-            const merged = applyParamOverrides(rawContent, overrides);
+            const applied = applyParamOverrides(rawContent, overrides);
+            const offeredInChat = sessionOfferedParams(agentSessionId(exec));
+            const declaredDefaults = new Map(declared.map(p => [p.name, p.value]));
+            const rebind = rebindExpandedDefaults(applied.content, applied.params.flatMap(p => [declaredDefaults.get(p.name), modelPrefill?.[p.name], offeredInChat.get(p.name)]
+                .filter((from) => typeof from === 'string')
+                .map(from => ({ name: p.name, from, to: p.value }))));
+            if (rebind.rebound.length > 0) {
+                log.info('webclaw_run: body had literal defaults for %s — rebound to confirmed values', rebind.rebound.join(','));
+            }
+            const merged = { content: rebind.content, params: applied.params };
             // Soft status only — never block open for missing password (SSO / session OK).
             const lite = await env();
             // Re-apply deploy systems (URL + optional test credentials).

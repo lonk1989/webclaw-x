@@ -116,7 +116,7 @@ macOS:   ~/.webclaw/bin/webclaw-accounts
 ```
 
 
-Config knobs: `accountsUi` (default true), `accountsUiPort` (default 19229).
+Config knobs: `accountsUi` (default true), `accountsUiPort` (default 19229), `liveAutoOpen` (default false — set true to expand the right-rail live tab when a run starts).
 
 Recipes keep alias login only, e.g. `登录EHR系统`. Use the **SSO login URL** in the vault when the corp site supports Feishu/Lark SSO. Missing password does **not** block opening the site; the login step opens the URL, handles authorize when needed, and only asks for vault passwords on a classic username/password form. The agent must never invent `accounts set --password` or ask you to paste a password into chat.
 

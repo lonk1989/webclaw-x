@@ -199,8 +199,9 @@ export function runLite(env, args, options = {}) {
             cancelled: true,
         });
     }
-    // A new blocking run supersedes a stale HITL handle.
-    if (!earlyHitl && activeHitl) {
+    // Only a new recipe run supersedes a parked HITL run. Utility calls made while
+    // the human is answering (captcha OCR, accounts list, status) must not kill it.
+    if (!earlyHitl && activeHitl && args[0] === 'run') {
         cancelActiveHitl(home);
     }
     return new Promise(resolve => {

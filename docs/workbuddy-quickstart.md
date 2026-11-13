@@ -2,7 +2,7 @@
 
 面向**任意互联网用户**：不 clone 仓库、不碰 cargo、不依赖蜂行 / DSH 客户端。装好后在 WorkBuddy（或 Cursor）里直接调用 `webclaw_*` 工具。
 
-> 当前钉选版本：**v0.2.3**（可用环境变量改成 `latest`）。  
+> 当前钉选版本：**v0.2.4**（可用环境变量改成 `latest`）。  
 > 仓库：<https://github.com/lonk1989/webclaw-x>
 
 ## 你需要什么
@@ -27,7 +27,7 @@ irm https://raw.githubusercontent.com/lonk1989/webclaw-x/main/scripts/install_wo
 可选：指定业务域名白名单草稿、版本：
 
 ```powershell
-$env:WEBCLAW_VERSION = "0.2.3"
+$env:WEBCLAW_VERSION = "0.2.4"
 $env:WEBCLAW_HOSTS = "app.example.com,login.example.com"
 irm https://raw.githubusercontent.com/lonk1989/webclaw-x/main/scripts/install_workbuddy.ps1 | iex
 ```
@@ -39,7 +39,7 @@ curl -fsSL https://raw.githubusercontent.com/lonk1989/webclaw-x/main/scripts/ins
 ```
 
 ```bash
-export WEBCLAW_VERSION=0.2.3
+export WEBCLAW_VERSION=0.2.4
 export WEBCLAW_HOSTS='app.example.com,login.example.com'
 curl -fsSL https://raw.githubusercontent.com/lonk1989/webclaw-x/main/scripts/install_workbuddy.sh | bash
 ```
@@ -110,7 +110,7 @@ Cursor：设置 → MCP，确认 `webclaw-x` 已加载后重连。
 默认下载根：
 
 ```text
-https://feixingai-agent.oss-cn-beijing.aliyuncs.com/webclaw-x/v0.2.3/
+https://feixingai-agent.oss-cn-beijing.aliyuncs.com/webclaw-x/v0.2.4/
 ```
 
 内含 Win / macOS arm64 / Linux x64 的 `webclaw-lite-*` 与 `webclaw-x-host.zip`（及 `.sha256`）。  
@@ -122,14 +122,14 @@ https://feixingai-agent.oss-cn-beijing.aliyuncs.com/webclaw-x/v0.2.3/
 
 ```powershell
 # 先把 Release 资产下到某目录，再上传
-node scripts/upload_oss.mjs --version 0.2.3 --dir $env:TEMP\webclaw-x-oss-v0.2.3
+node scripts/upload_oss.mjs --version 0.2.4 --dir $env:TEMP\webclaw-x-oss-v0.2.4
 ```
 
 覆盖默认 OSS 根或单文件：
 
 ```powershell
 $env:WEBCLAW_OSS_BASE = "https://feixingai-agent.oss-cn-beijing.aliyuncs.com/webclaw-x"
-$env:WEBCLAW_LITE_BASE = "https://your-cdn.example.com/webclaw-x/v0.2.3"
+$env:WEBCLAW_LITE_BASE = "https://your-cdn.example.com/webclaw-x/v0.2.4"
 $env:WEBCLAW_HOST_URL  = "https://your-cdn.example.com/webclaw-x-host.zip"
 ```
 

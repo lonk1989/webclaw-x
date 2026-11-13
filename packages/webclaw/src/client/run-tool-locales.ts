@@ -9,6 +9,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 
 export const zh = {
   pending: '正在执行菜谱…',
+  waitingStart: '请先确认运行参数，确认后开始执行',
   offline: '本机日志服务未就绪',
   empty: '等待步骤日志…',
   placeholder: '等待画面…',
@@ -20,6 +21,7 @@ export const zh = {
 
 export const en = {
   pending: 'Running recipe…',
+  waitingStart: 'Confirm the run parameters first; the run starts after that',
   offline: 'Local log service offline',
   empty: 'Waiting for step logs…',
   placeholder: 'Waiting for frame…',

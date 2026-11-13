@@ -5,7 +5,7 @@
 菜谱 = **指令（动词）** + **目标/参数**；中英动词同一回放路径（如 `打开`/`open`、`等待`/`wait`、`采集`/`collect`）。
 
 > 仓库：<https://github.com/lonk1989/webclaw-x>  
-> 当前发布：[v0.2.3](https://github.com/lonk1989/webclaw-x/releases/tag/v0.2.3)  
+> 当前发布：[v0.2.4](https://github.com/lonk1989/webclaw-x/releases/tag/v0.2.4)  
 > 打 `v*` 标签后 GitHub Actions（`.github/workflows/release.yml`）会构建并上传 **Windows x64 / macOS arm64 / Linux x64** 预编译；也可在 Actions 里对已有 tag 手动 Run workflow。
 
 ---
@@ -152,7 +152,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 | `webclaw-lite-macos-arm64` (+ `.sha256`) | macOS Apple Silicon |
 | `webclaw-lite-linux-x64` (+ `.sha256`) | Linux x86_64（CI 用 Ubuntu 24.04；需 glibc ≥ 2.38） |
 
-也可在 GitHub → Actions → **release** → Run workflow，填已有 tag（如 `v0.2.3`）补传资产。本仓 **不做** npm publish（那是 oss 插件路径）。
+也可在 GitHub → Actions → **release** → Run workflow，填已有 tag（如 `v0.2.4`）补传资产。本仓 **不做** npm publish（那是 oss 插件路径）。
 
 ---
 

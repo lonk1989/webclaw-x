@@ -16,7 +16,7 @@
   Fallback: GitHub Releases (then optional ghfast mirrors).
 
   Optional env / params:
-    WEBCLAW_VERSION / -Version   tag without v (default 0.2.3; "latest" allowed)
+    WEBCLAW_VERSION / -Version   tag without v (default 0.2.4; "latest" allowed)
     WEBCLAW_HOME                 install root (default %LOCALAPPDATA%\webclaw)
     WEBCLAW_HOSTS / -Hosts       draft policy hosts (comma-separated)
     WEBCLAW_NO_MERGE=1 / -NoMerge  skip writing WorkBuddy/Cursor mcp.json
@@ -25,7 +25,7 @@
 #>
 [CmdletBinding()]
 param(
-  [string]$Version = $(if ($env:WEBCLAW_VERSION) { $env:WEBCLAW_VERSION } else { "0.2.3" }),
+  [string]$Version = $(if ($env:WEBCLAW_VERSION) { $env:WEBCLAW_VERSION } else { "0.2.4" }),
   [string]$Hosts = $(if ($env:WEBCLAW_HOSTS) { $env:WEBCLAW_HOSTS } else { "" }),
   [switch]$NoMerge = ($env:WEBCLAW_NO_MERGE -eq "1")
 )
@@ -62,7 +62,7 @@ function Get-OssDir {
       if ($j.version) { return "$DefaultOssRoot/v$([string]$j.version.TrimStart('v'))" }
     }
   } catch { }
-  return "$DefaultOssRoot/v0.2.3"
+  return "$DefaultOssRoot/v0.2.4"
 }
 
 function Get-ReleaseDirUrls {
@@ -243,7 +243,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 [project]
 name = "webclaw-x"
-version = "0.2.3"
+version = "0.2.4"
 requires-python = ">=3.10"
 dependencies = ["mcp>=1.0,<2.0", "anyio>=4.0"]
 [tool.setuptools.packages.find]

@@ -27,6 +27,8 @@ export interface LiveTimelineFrame {
 export declare function startAccountsUiServer(options: {
     enabled: boolean;
     preferredPort: number;
+    /** Client reveals the live tab on new runs only when true. */
+    liveAutoOpen?: boolean;
     getEnv: () => Promise<LiteEnv>;
     home: string;
     binaryPath: string;

@@ -219,6 +219,41 @@ export function collectConfirmableParams(content, overrides) {
     }
     return order.map(name => ({ name, value: map.get(name) ?? '' }));
 }
+/**
+ * Point literal defaults in step bodies at the confirmed value, for names the
+ * recipe never references as `{{名}}` (skill authors / models that expanded
+ * `参数月份=七月` into `点击七月`). Without this a form edit cannot reach the body.
+ */
+export function rebindExpandedDefaults(content, edits) {
+    const placeholders = new Set(extractMustacheParams(content));
+    const active = edits
+        .map(e => ({ name: e.name.trim(), from: e.from.trim(), to: e.to.trim() }))
+        .filter(e => e.name !== ''
+        && e.from.length >= 2
+        && e.to !== ''
+        && e.from !== e.to
+        && !placeholders.has(e.name))
+        // Longer literals first so「中环洁(北京)…」is not clipped by a shorter default.
+        .sort((a, b) => b.from.length - a.from.length);
+    if (active.length === 0)
+        return { content, rebound: [] };
+    const rebound = new Set();
+    const steps = splitRecipeSteps(content).map(step => {
+        if (step.startsWith('参数') || step.startsWith('动态参数'))
+            return step;
+        let out = step;
+        for (const e of active) {
+            if (!out.includes(e.from))
+                continue;
+            out = out.split(e.from).join(e.to);
+            rebound.add(e.name);
+        }
+        return out;
+    });
+    if (rebound.size === 0)
+        return { content, rebound: [] };
+    return { content: steps.join('，'), rebound: [...rebound] };
+}
 /** Parse tool `params` arg: JSON object string or already-plain record. */
 export function parseParamsArg(raw) {
     if (raw == null || raw === '')

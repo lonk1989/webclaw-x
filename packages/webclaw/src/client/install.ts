@@ -208,6 +208,8 @@ export function installWebclawSurfaces(ctx: Context): void {
         // If the user collapses the right rail, stop forcing it back open.
         let userCollapsedRail = false
         let everOpened = false
+        /** Host `liveAutoOpen`; off → never openTab, the user opens the live tab by hand. */
+        let autoOpen = false
 
         const noteCollapsedIfAny = (): void => {
           try {
@@ -248,7 +250,7 @@ export function installWebclawSurfaces(ctx: Context): void {
         const onOpenLive = (ev: Event) => {
           const detail = (ev as CustomEvent<WebclawOpenLiveDetail>).detail
           const runDir = detail?.runDir?.trim() || ''
-          if (!runDir || cancelled) return
+          if (!runDir || cancelled || !autoOpen) return
           noteCollapsedIfAny()
           // User closed the rail — don't yank it open from the tool card either.
           if (userCollapsedRail) return
@@ -268,7 +270,10 @@ export function installWebclawSurfaces(ctx: Context): void {
             const j = (await res.json()) as {
               ok?: boolean
               focus?: { runDir?: string; seq?: number }
+              autoOpen?: boolean
             }
+            autoOpen = j.autoOpen === true
+            if (!autoOpen) return
             const focus = j.focus
             const seq = typeof focus?.seq === 'number' ? focus.seq : -1
             const runDir = focus?.runDir?.trim() || pendingRunDir

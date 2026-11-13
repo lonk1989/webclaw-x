@@ -60,6 +60,11 @@ export interface Config {
     accountsUi: boolean;
     /** Preferred loopback port for accounts UI (default 19229). */
     accountsUiPort: number;
+    /**
+     * Expand the right rail to the live execution tab when a run starts.
+     * Default false — the tab stays available in the right sidebar to open by hand.
+     */
+    liveAutoOpen: boolean;
 }
 /** One site entry for `config.systems` (private fork may include test credentials). */
 export interface SystemEntryConfig {
