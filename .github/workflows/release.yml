@@ -50,14 +50,27 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # ort-sys copies onnxruntime DLLs into target/release/{.,examples,deps} when it
-      # cannot symlink (checkout on D:, cargo cache on C:); a missing dir aborts the build.
+      # ort-sys copy-dylibs: OUT_DIR.ancestors().nth(3) is usually target/release, but
+      # some runners resolve an extra build/ segment. Missing examples|deps → Os(3).
+      # Create both layouts; also touch target/release itself before cargo.
       - name: Pre-create ort-sys dylib dirs (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: New-Item -ItemType Directory -Force target/release/examples, target/release/deps | Out-Null
+        run: |
+          $dirs = @(
+            'target/release',
+            'target/release/examples',
+            'target/release/deps',
+            'target/release/build',
+            'target/release/build/examples',
+            'target/release/build/deps'
+          )
+          New-Item -ItemType Directory -Force -Path $dirs | Out-Null
 
       - name: Build webclaw-lite
+        env:
+          # Prefer copy over cross-drive symlink failures on windows-latest (C: cache / D: work).
+          RUST_BACKTRACE: '1'
         run: cargo build --release -p webclaw --bin webclaw-lite
 
       - name: Stage asset + SHA256 (Windows)
