@@ -67,6 +67,43 @@ function readLiveMeta(runDir) {
         return null;
     }
 }
+function detectLivePhase(home, runDir) {
+    const waiting = join(runDir, 'human', 'waiting_human.json');
+    const replyCancel = join(runDir, 'human', 'human_reply.json');
+    const cancelMarker = join(home, 'control', 'cancel');
+    const hasPreview = existsSync(join(runDir, 'live-preview.png'));
+    const hasTimeline = existsSync(join(runDir, 'live-timeline.json'));
+    if (existsSync(waiting)) {
+        return { phase: 'need_human', hint: '等待人工确认或验证码' };
+    }
+    if (existsSync(cancelMarker) && (hasPreview || hasTimeline)) {
+        // Marker may be stale; prefer cancelling while focus still points here.
+        const focused = latestFocus?.runDir && underHome(home, latestFocus.runDir) === runDir;
+        if (focused) {
+            return { phase: 'cancelling', hint: '正在取消…' };
+        }
+    }
+    try {
+        if (existsSync(replyCancel)) {
+            const raw = JSON.parse(readFileSync(replyCancel, 'utf8'));
+            if (raw && raw.cancel === true) {
+                return { phase: 'cancelled', hint: '用户已取消' };
+            }
+        }
+    }
+    catch {
+        /* ignore */
+    }
+    // Focused run with preview but no waiting → still running (or just finished).
+    const focusedNow = latestFocus?.runDir && underHome(home, latestFocus.runDir) === runDir;
+    if (focusedNow && (hasPreview || hasTimeline)) {
+        return { phase: 'running', hint: '执行中' };
+    }
+    if (hasPreview || hasTimeline) {
+        return { phase: 'done', hint: '本段已结束（保留最后一帧）' };
+    }
+    return { phase: 'idle', hint: '等待执行' };
+}
 function readLiveTimeline(runDir) {
     const timelinePath = join(runDir, 'live-timeline.json');
     if (!existsSync(timelinePath))
@@ -84,8 +121,10 @@ function readLiveTimeline(runDir) {
                 if (!Number.isFinite(id) || id <= 0 || !file)
                     continue;
                 const keyword = typeof f.keyword === 'string' ? f.keyword : undefined;
-                // Drop legacy captcha-crop frames so scrubber stays on real page shots.
-                if (keyword === '验证码')
+                // Keep page heartbeats during HITL (keyword may be 验证码). Only skip
+                // legacy captcha-crop files that are not full-page live-frames.
+                const lowerFile = file.toLowerCase();
+                if (lowerFile.includes('captcha') && !lowerFile.includes('live'))
                     continue;
                 frames.push({
                     id,
@@ -437,6 +476,7 @@ export async function startAccountsUiServer(options) {
                 }
                 const meta = readLiveMeta(safe);
                 const timeline = readLiveTimeline(safe);
+                const phaseInfo = detectLivePhase(options.home, safe);
                 const hasLive = existsSync(join(safe, 'live-preview.png'));
                 const hasShot = (() => {
                     const shotDir = join(safe, 'screenshots');
@@ -449,7 +489,8 @@ export async function startAccountsUiServer(options) {
                         return false;
                     }
                 })();
-                // Captcha crops are not live-preview frames.
+                const hasCaptcha = existsSync(join(safe, 'human', 'captcha.png'));
+                // Captcha crops are not live-preview frames; page heartbeats remain in timeline.
                 sendJson(res, 200, {
                     ok: true,
                     runDir: safe,
@@ -457,6 +498,10 @@ export async function startAccountsUiServer(options) {
                     frames: timeline.frames,
                     latestId: timeline.latestId,
                     hasPng: hasLive || hasShot || timeline.frames.length > 0,
+                    phase: phaseInfo.phase,
+                    hint: phaseInfo.hint,
+                    preferLivePreview: phaseInfo.phase === 'need_human' || phaseInfo.phase === 'cancelling',
+                    hasCaptcha,
                 });
                 return;
             }

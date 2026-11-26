@@ -21,7 +21,7 @@ function normalizeRecipeText(content: string): string {
  * Escape sequences `\,` `\，` keep the comma literal (same idea as runtime).
  *
  * Newlines become `，` (not empty): otherwise
- * `参数原因=家中有事\n登录EHR系统` collapses to `参数原因=家中有事登录EHR系统`
+ * `参数原因=家中有事\n登录演示系统` collapses to `参数原因=家中有事登录演示系统`
  * and the login step is lost.
  */
 export function splitRecipeSteps(content: string): string[] {
@@ -67,7 +67,7 @@ export function extractRecipeParams(content: string): RecipeParamKv[] {
     const eq = body.indexOf('=')
     if (eq <= 0) continue
     const name = body.slice(0, eq).trim()
-    // Drop glued verbs from older newline bugs: 家中有事登录EHR系统 → 家中有事
+    // Drop glued verbs from older newline bugs: 家中有事登录演示系统 → 家中有事
     let value = body.slice(eq + 1).trim()
     value = value.replace(
       /(?<=[\u4e00-\u9fffA-Za-z0-9])(登录|打开|点击|输入|等待)[\u4e00-\u9fffA-Za-z0-9#{}={{}}\s_-]*$/u,

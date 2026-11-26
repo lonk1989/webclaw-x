@@ -1178,7 +1178,7 @@ mod tests {
         let _ = commands::list_commands();
         // 常见写法：登录后试探关改密/协议弹窗；没有取消则跳过
         let steps =
-            parse_recipe_steps("登录旧MES系统，(点击取消?)，点击人工扫保管理").unwrap();
+            parse_recipe_steps("登录演示系统，(点击取消?)，点击人工扫保管理").unwrap();
         assert_eq!(steps.len(), 3);
         assert_eq!(steps[0].keyword, "登录");
         assert!(steps[0].or_group.is_none());

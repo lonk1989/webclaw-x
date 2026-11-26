@@ -833,6 +833,85 @@ impl RunSession {
         self.save_png_bytes(&name, png, Some(step_index))
     }
 
+    /// Opt-in: mark a run-dir-relative path for DSH 资料库 promotion.
+    /// Idempotent. Paths outside the run dir are rejected.
+    pub fn mark_library_deliverable(
+        &self,
+        rel_or_name: &str,
+        reason: &str,
+    ) -> Result<(), String> {
+        let rel = normalize_library_rel(rel_or_name);
+        if rel.is_empty() {
+            return Err("library deliverable path empty".into());
+        }
+        // Reject absolute / escape attempts.
+        if Path::new(&rel).is_absolute()
+            || rel.split('/').any(|p| p == "..")
+            || rel.contains(':')
+        {
+            return Err(format!("invalid library deliverable path: {rel}"));
+        }
+        let abs = self.run_dir.join(&rel);
+        if !path_is_within(&abs, &self.run_dir) {
+            return Err(format!("library path escapes run dir: {rel}"));
+        }
+        if !abs.is_file() {
+            return Err(format!("library deliverable missing: {rel}"));
+        }
+
+        let manifest = self.run_dir.join(LIBRARY_MANIFEST_FILE);
+        let key = path_key(Path::new(&rel));
+        let mut existing: HashSet<String> = HashSet::new();
+        if manifest.is_file() {
+            if let Ok(body) = fs::read_to_string(&manifest) {
+                for line in body.lines() {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if let Ok(v) = serde_json::from_str::<Value>(line) {
+                        if let Some(p) = v.get("path").and_then(|x| x.as_str()) {
+                            existing.insert(path_key(Path::new(p)));
+                        }
+                    }
+                }
+            }
+        }
+        if existing.contains(&key) {
+            return Ok(());
+        }
+
+        let entry = serde_json::json!({
+            "path": rel.replace('\\', "/"),
+            "reason": reason,
+            "at": Local::now().to_rfc3339(),
+        });
+        let mut line = entry.to_string();
+        line.push('\n');
+        if let Some(parent) = manifest.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        use std::io::Write;
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&manifest)
+            .map_err(|e| format!("open library-manifest: {e}"))?;
+        f.write_all(line.as_bytes())
+            .map_err(|e| format!("append library-manifest: {e}"))?;
+        Ok(())
+    }
+
+    /// Convenience: mark by artifact `rel_path` or `name` under documents/screenshots.
+    pub fn mark_artifact_for_library(&self, art: &RunArtifact, reason: &str) -> Result<(), String> {
+        let rel = if !art.rel_path.is_empty() {
+            art.rel_path.clone()
+        } else {
+            art.name.clone()
+        };
+        self.mark_library_deliverable(&rel, reason)
+    }
+
     /// Overwrite live-preview.png + live-preview.json, and append a scrubber frame.
     pub fn write_live_preview(
         &self,
@@ -1163,6 +1242,16 @@ fn is_ignored_artifact_name(name: &str) -> bool {
     lower == "thumbs.db" || lower == "desktop.ini" || lower == ".ds_store"
 }
 
+const LIBRARY_MANIFEST_FILE: &str = "library-manifest.jsonl";
+
+fn normalize_library_rel(raw: &str) -> String {
+    let mut s = raw.trim().replace('\\', "/");
+    while s.starts_with("./") {
+        s = s[2..].to_string();
+    }
+    s.trim_start_matches('/').to_string()
+}
+
 /// 统一路径键：正斜杠 + Windows 下小写，避免 `files/a.xlsx` 与 `files\a.xlsx` 被当成两条产物
 fn path_key(p: &Path) -> String {
     let s = p.to_string_lossy().replace('\\', "/");
@@ -1193,6 +1282,37 @@ mod path_key_tests {
         let mixed = base.join("files/考勤记录表-已填充.xlsx");
         let native = base.join("files").join("考勤记录表-已填充.xlsx");
         assert_eq!(path_key(&mixed), path_key(&native));
+    }
+}
+
+#[cfg(test)]
+mod library_manifest_tests {
+    use super::*;
+
+    #[test]
+    fn mark_library_deliverable_is_idempotent_and_normalized() {
+        let dir = std::env::temp_dir().join(format!("webclaw-lib-manifest-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(dir.join("screenshots")).unwrap();
+        let session = RunSession::open_for_upload(&dir, "t", "test").unwrap();
+        let png = dir.join("screenshots").join("step-01-01-manual.png");
+        fs::write(&png, b"fakepng").unwrap();
+
+        session
+            .mark_library_deliverable("screenshots\\step-01-01-manual.png", "screenshot")
+            .unwrap();
+        session
+            .mark_library_deliverable("screenshots/step-01-01-manual.png", "screenshot")
+            .unwrap();
+
+        let body = fs::read_to_string(dir.join(LIBRARY_MANIFEST_FILE)).unwrap();
+        let lines: Vec<_> = body.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("screenshots/step-01-01-manual.png"));
+
+        assert!(session
+            .mark_library_deliverable("../outside.png", "x")
+            .is_err());
+        let _ = fs::remove_dir_all(&dir);
     }
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "@lonk1989/webclaw",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "DeepSeek Harness plugin: deterministic Chinese-recipe browser RPA via webclaw-lite",
   "license": "MIT",
   "type": "module",
@@ -42,6 +42,7 @@
     "build": "tsc -p tsconfig.json && node scripts/build-client.mjs",
     "build:host": "tsc -p tsconfig.json",
     "build:client": "node scripts/build-client.mjs",
+    "test:promote": "tsc -p tsconfig.test.json && node --test .tmp-test/promote-outputs.test.js",
     "sync:local": "npm run build && node scripts/sync-local.mjs",
     "sync:local:plugin": "npm run build && node scripts/sync-local.mjs --skip-lite",
     "prepublishOnly": "npm run build"

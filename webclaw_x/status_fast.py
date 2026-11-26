@@ -145,6 +145,30 @@ def inspect_chrome(port: int, cdp_ready: bool) -> dict:
     }
 
 
+def _preview_paths(home: str | Path, run_dir: str | None) -> dict:
+    """Best-effort live/captcha paths under WEBCLAW_HOME for agent/user visibility."""
+    if not run_dir:
+        return {}
+    try:
+        rd = Path(run_dir)
+        home_path = Path(home).resolve()
+        if not rd.is_absolute():
+            rd = home_path / "runs" / run_dir
+        rd = rd.resolve()
+        if not rd.is_relative_to(home_path):
+            return {"runDir": str(run_dir)}
+    except (OSError, ValueError):
+        return {"runDir": str(run_dir)}
+    out: dict = {"runDir": str(rd)}
+    live = rd / "live-preview.png"
+    captcha = rd / "human" / "captcha.png"
+    if live.is_file():
+        out["livePreviewPath"] = str(live)
+    if captcha.is_file():
+        out["captchaPath"] = str(captcha)
+    return out
+
+
 def build_status(*, repo_root: Path | None = None, deep: bool = False) -> dict:
     """Return lite-compatible status object for Host envelope data."""
     bin_path = resolve_lite_bin(repo_root)
@@ -153,6 +177,22 @@ def build_status(*, repo_root: Path | None = None, deep: bool = False) -> dict:
     ready = probe_cdp_ready(port)
     inspect = inspect_chrome(port, ready)
     home = os.environ.get("WEBCLAW_HOME", str(Path.home() / ".webclaw"))
+    # Control-plane: jobs + HITL + cancel marker (no lite spawn).
+    try:
+        from webclaw_x import jobs as jobs_mod
+
+        control = jobs_mod.inspect_control_plane(home)
+    except Exception:  # noqa: BLE001 — status must never crash the gateway
+        control = {
+            "busy": False,
+            "activeRun": None,
+            "waitingHuman": False,
+            "needHuman": None,
+            "cancelMarkerPresent": (Path(home) / "control" / "cancel").is_file(),
+        }
+    need = control.get("needHuman")
+    preview = _preview_paths(home, (need or {}).get("run_dir") if isinstance(need, dict) else None)
+    inbox = preview.get("captchaPath") or preview.get("livePreviewPath")
     status = {
         "type": "status",
         "product": "webclaw-lite",
@@ -167,17 +207,20 @@ def build_status(*, repo_root: Path | None = None, deep: bool = False) -> dict:
         "skillProvider": "local",
         "corpSignedIn": False,
         "corpUser": None,
-        "waitingHuman": False,
-        "needHuman": None,
+        "busy": bool(control.get("busy")),
+        "activeRun": control.get("activeRun"),
+        "waitingHuman": bool(control.get("waitingHuman")),
+        "needHuman": need,
+        "cancelMarkerPresent": bool(control.get("cancelMarkerPresent")),
         "lastNeedHuman": None,
-        "inboxImage": None,
+        "inboxImage": inbox,
+        "preview": preview or None,
         "statusSource": "host_fast",
     }
     if inspect.get("warn"):
         status["chromeWarn"] = inspect["warn"]
     if deep:
-        # Placeholder: deep fields (active HITL) still need lite / daemon in phase-2.
-        status["statusSource"] = "host_fast_shallow"
+        status["statusSource"] = "host_fast_control"
     return status
 
 
@@ -187,4 +230,5 @@ __all__ = [
     "find_chrome_bin",
     "inspect_chrome",
     "probe_cdp_ready",
+    "_preview_paths",
 ]

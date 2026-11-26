@@ -15,6 +15,8 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset(
         "webclaw_human_reply",
         "webclaw_cancel",
         "webclaw_set_display",
+        "webclaw_browser",
+        "webclaw_reset",
     }
 )
 

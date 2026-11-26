@@ -90,6 +90,8 @@ export function WebclawLive({ t, useTabInfo }: WebclawLiveProps): ReactNode {
   const [imgUrl, setImgUrl] = useState('')
   const [error, setError] = useState('')
   const [dragging, setDragging] = useState(false)
+  const [phase, setPhase] = useState<string>('idle')
+  const [phaseHint, setPhaseHint] = useState('')
 
   const liveRef = useRef(true)
   const draggingRef = useRef(false)
@@ -117,6 +119,8 @@ export function WebclawLive({ t, useTabInfo }: WebclawLiveProps): ReactNode {
     liveRef.current = true
     setDragging(false)
     draggingRef.current = false
+    setPhase('idle')
+    setPhaseHint('')
   }, [])
 
   useEffect(() => {
@@ -240,6 +244,9 @@ export function WebclawLive({ t, useTabInfo }: WebclawLiveProps): ReactNode {
           latestId?: number | null
           hasPng?: boolean
           error?: string
+          phase?: string
+          hint?: string
+          preferLivePreview?: boolean
         }
         if (cancelled) return
         if (!metaJson.ok) {
@@ -247,6 +254,8 @@ export function WebclawLive({ t, useTabInfo }: WebclawLiveProps): ReactNode {
           return
         }
         setError('')
+        setPhase(metaJson.phase || 'idle')
+        setPhaseHint(typeof metaJson.hint === 'string' ? metaJson.hint : '')
 
         const nextFrames = Array.isArray(metaJson.frames) ? metaJson.frames : []
         setFrames(nextFrames)
@@ -275,9 +284,10 @@ export function WebclawLive({ t, useTabInfo }: WebclawLiveProps): ReactNode {
         }
 
         const frame = nextFrames[viewIndex]
-        // Live mode: pin to latest frame id so each heartbeat gets a distinct URL
-        // (live-preview.png alone can look "stuck" under aggressive image caching).
-        const frameId = frame?.id ?? null
+        // During NEED_HUMAN / cancelling: prefer live-preview.png so scrubber
+        // is not stuck on a pre-HITL frame after keyword filtering.
+        const useLiveFile = Boolean(followLive && metaJson.preferLivePreview)
+        const frameId = useLiveFile ? null : (frame?.id ?? null)
         const bust = String(
           followLive
             ? metaJson.meta?.updatedAt ||
@@ -320,6 +330,46 @@ export function WebclawLive({ t, useTabInfo }: WebclawLiveProps): ReactNode {
   const maxIdx = Math.max(0, frames.length - 1)
   const progress = maxIdx === 0 ? 1 : index / maxIdx
 
+  const phaseLabel = (() => {
+    switch (phase) {
+      case 'running':
+        return t('phaseRunning')
+      case 'need_human':
+        return t('phaseNeedHuman')
+      case 'cancelling':
+        return t('phaseCancelling')
+      case 'cancelled':
+        return t('phaseCancelled')
+      case 'done':
+        return t('phaseDone')
+      default:
+        return t('phaseIdle')
+    }
+  })()
+  const phaseTone =
+    phase === 'need_human'
+      ? { bg: '#ea580c', fg: '#9a3412' }
+      : phase === 'cancelled' || phase === 'cancelling'
+        ? { bg: '#dc2626', fg: '#991b1b' }
+        : phase === 'running'
+          ? { bg: '#16a34a', fg: '#15803d' }
+          : { bg: 'currentColor', fg: 'inherit' }
+
+  const phaseChipStyle: CSSProperties = {
+    border: 'none',
+    fontSize: 12,
+    fontWeight: 600,
+    padding: '4px 10px',
+    borderRadius: 999,
+    background: `color-mix(in srgb, ${phaseTone.bg} 18%, transparent)`,
+    color: phaseTone.fg,
+    boxShadow: `0 0 0 1px color-mix(in srgb, ${phaseTone.bg} 40%, transparent)`,
+    maxWidth: 160,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  }
+
   const chipStyle: CSSProperties = {
     border: 'none',
     cursor: 'pointer',
@@ -360,19 +410,32 @@ export function WebclawLive({ t, useTabInfo }: WebclawLiveProps): ReactNode {
       >
         <div
           style={{
-            fontSize: 13,
-            fontWeight: 600,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-            opacity: live ? 0.55 : 0.9,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            minWidth: 0,
+            flex: 1,
           }}
-          title={live ? t('live') : frameLabel(current, '')}
         >
-          {live ? t('scrubHint') : label}
+          <span style={phaseChipStyle} title={phaseHint || phaseLabel}>
+            {phaseLabel}
+          </span>
+          <div
+            style={{
+              fontSize: 13,
+              fontWeight: 600,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              opacity: live ? 0.55 : 0.9,
+            }}
+            title={live ? t('live') : frameLabel(current, '')}
+          >
+            {live ? t('scrubHint') : label}
+          </div>
         </div>
         <button type="button" style={chipStyle} onClick={goLive} aria-pressed={live}>
-          {t('live')}
+          {phase === 'cancelled' || phase === 'done' ? phaseLabel : t('live')}
         </button>
       </div>
 

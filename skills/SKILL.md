@@ -5,8 +5,8 @@
 
 确定性菜谱浏览器 RPA。菜谱 = **动词指令 + 目标/参数**；中英动词同源。经 MCP 调用，禁止 Playwright/CSS 重写。
 
-**用户说「打开 MES」≠ 查账号，也 ≠ 用默认浏览器打开 URL。**  
-→ 立刻 `webclaw_run(recipe="打开旧MES系统")`。禁止 `Start-Process` / `open` / `xdg-open`。  
+**用户说「打开某某」≠ 查账号，也 ≠ 用默认浏览器打开 URL。**  
+→ 立刻 `webclaw_run(recipe="打开https://…" 或 "登录{保险箱站点名}")`（名称须与保险箱一致；无内置 EHR/MES/OA 别名）。禁止 `Start-Process` / `open` / `xdg-open`。  
 动词表：[docs/recipe-verbs.md](../docs/recipe-verbs.md)（安装后 `$WEBCLAW_HOME/mcp/RECIPE-VERBS.md`）。
 
 ## 0. 发现 → 安装 → 接通（人/部署者）
@@ -31,16 +31,17 @@ curl -fsSL https://raw.githubusercontent.com/lonk1989/webclaw-x/main/scripts/ins
 ```
 
 - 仅当**改引擎源码**才用 `./scripts/build_runtime.sh`（会生成巨大 `target/`，终端用户勿走）。
-- 默认 `WEBCLAW_TOOLS=core` → list_tools 只暴露 **core7**；完整工具设 `WEBCLAW_TOOLS=all`。
+- 默认 `WEBCLAW_TOOLS=core` → list_tools 暴露核心工具（含 `browser` / `reset`）；完整目录设 `WEBCLAW_TOOLS=all`。
 - **常驻 stdio**：一会话只拉起一次网关；禁止每工具 respawn（评测：`scripts/call_tool.py --persist …`）。
+- **单 Chrome 多 tab**：同 `WEBCLAW_HOME` 复用一只调试 Chrome；并行靠标签 + 串行 run，不要多开实例。
 
 ## 1. 掌握（会话内，分钟级）
 
 1. 用户含「打开/点击/采集/登录」→ **直接 `webclaw_run`**，不要先空转 accounts
-2. `webclaw_status`∥`webclaw_list_recipes` 各一次即可（status 热路径，勿×3）
+2. `webclaw_status`∥`webclaw_list_recipes` 各一次即可（status 热路径，勿×3）；留意 `busy` / `waitingHuman` / `cancelMarkerPresent`
 3. 跑 fixture：`webclaw_run` 一次完整菜谱（见 `recipes/fixture-table.webclaw`）
 
-**core7**：`status` / `run` / `probe` / `freeze` / `list_recipes` / `human_reply` / `cancel`
+**core**：`status` / `run` / `probe` / `freeze` / `list_recipes` / `human_reply` / `cancel` / `set_display` / `browser` / `reset`
 
 ## 2. 铁律（省 token：一条菜谱、一次 run）
 
@@ -58,6 +59,7 @@ RPA 的目的是**少消耗模型 token**。禁止用多次 `webclaw_run` / 碎�
 8. 含「参数名=值」或 `{{名}}` → **运行前先确认**：保留声明/占位符原样传入（禁止先展开成字面量）；Host 会弹参数确认；若返回 `needParams` 则展示表等用户。禁止静默用占位默认值开跑；禁止首次就 `paramsConfirmed=true`。失败补丁/重跑：**复用**已确认 params，禁止再问或清空。
 9. **试探** `(点击取消?)` / `（试探？备选）`：合法运行时语法（先试探，失败走备选或跳过）。必须原样保留，禁止当注释删掉。
 10. 长停调 `webclaw_cancel`；空闲 cancel → `NO_ACTIVE_RUN`。
+11. **自愈**：`status` →（busy/HITL/幽灵取消）`cancel` → 仍脏则 `webclaw_reset(soft|hard)` → 再 `run`。弃聊验证码不要换会话硬开；**不做跨会话 human_reply**。工具结果的 `phase` / `userMessage` / `preview` 必须转述用户。
 
 ## 3. 真业务 checklist（开跑前勾完）
 
@@ -65,7 +67,7 @@ RPA 的目的是**少消耗模型 token**。禁止用多次 `webclaw_run` / 碎�
       `python scripts/policy_draft.py --hosts 'app.example.com' --out $WEBCLAW_HOME/policy.json`
 - [ ] **params_confirmed**：非秘密 `{{…}}` 已由用户确认。
 - [ ] **HITL / 登录**：验证码与确认等人；不猜码。需要登录态时复用 Chrome profile（见下）。
-- [ ] **cancel**：Host Stop = 真调 `webclaw_cancel`，防 `RUN_BUSY` 残留。
+- [ ] **cancel / reset**：Host Stop = 真调 `webclaw_cancel`；弃聊或 `RUN_BUSY` 残留用 `webclaw_reset`。
 - [ ] **一次 run**：回放只 `webclaw_run` 一次；失败至多 1 次补丁，再失败就停并求助；禁止 ps1/裸 CDP；新站点先 probe→freeze→publish，再 run。
 
 ### 登录 profile 复用
@@ -95,10 +97,10 @@ MVP：打开/open、点击/click、等待/wait、输入/type、采集/collect、
 | 跑/补丁成功 | 展示完整菜谱（见 §6）；落库须用户同意后再 save_skill；非技能默认只发代码块 |
 | 看不清页面 | 一次 `webclaw_probe` 或 `采集…`；禁止写 ps1/裸 CDP |
 | `POLICY_DENIED` | 停；找部署者改 `allowed_hosts`（可用 policy_draft） |
-| `NEED_HUMAN` | 展示提示；`webclaw_human_reply(run_id, prompt_id, …)` |
+| `NEED_HUMAN` | 展示提示 + `userMessage`/`preview`；同会话 `webclaw_human_reply`；用户弃权 → `cancel` 或 `reset` |
 | `PARAMS_UNCONFIRMED` | 问用户后重跑并带 `params_confirmed=true` |
-| `RUN_BUSY` | 先 cancel/结束原任务 |
-| `NO_ACTIVE_RUN` / `NO_ACTIVE_HUMAN` | 勿重放归档 |
+| `RUN_BUSY` | 先 `cancel`；仍 busy → `webclaw_reset`；转述 phase 给用户 |
+| `NO_ACTIVE_RUN` / `NO_ACTIVE_HUMAN` | 勿重放归档；需要清场用 `reset` |
 
 ### 向用户求助（无头默认；保持短）
 

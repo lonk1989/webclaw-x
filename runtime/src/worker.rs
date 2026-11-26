@@ -37,8 +37,8 @@ fn print_usage() {
   webclaw-worker run --stdin [--title 名称] [--params JSON]
   webclaw-worker status [--run-id <id>]
   webclaw-worker accounts list
-  webclaw-worker accounts ensure --id ehr|old-mes [--name 名称] --url URL
-  webclaw-worker accounts set --id ehr|old-mes [--name 名称] [--url URL] --user 账号 --password 密码
+  webclaw-worker accounts ensure --id my-app [--name 名称] --url URL
+  webclaw-worker accounts set --id my-app [--name 名称] [--url URL] --user 账号 --password 密码
   webclaw-worker job --file <file.webclawjob>
   webclaw-worker secret-install --file <webclaw-remote-secret>
   webclaw-worker accounts-install --file <file.webclawacct>

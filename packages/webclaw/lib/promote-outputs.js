@@ -2,13 +2,16 @@
  * Promote webclaw run deliverables into the DSH workspace `outputs/` folder
  * and best-effort mark them in Fengxing's library-artifact-index.json.
  *
- * Deliverables: downloads/ documents/ files/ (+ recipe screenshots/).
- * Not promoted: executions/, live-preview*, live-frames/, human/, README, temps.
+ * Opt-in model:
+ * - Always: downloads/ + files/ (browser downloads & attachments)
+ * - Plus: paths listed in run_dir/library-manifest.jsonl (user「截图」、AI 报告、有行 CSV…)
+ * - Never blind-scan documents/ or screenshots/ (failure dumps / 页面采集 md stay in run dir)
  */
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync, } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, extname, join, relative } from 'node:path';
-const DELIVERABLE_DIRS = ['downloads', 'documents', 'files', 'screenshots'];
+import { basename, extname, join, relative, resolve } from 'node:path';
+const ALWAYS_DIRS = ['downloads', 'files'];
+const LIBRARY_MANIFEST = 'library-manifest.jsonl';
 const ALLOWED_EXT = new Set([
     '.docx',
     '.doc',
@@ -30,12 +33,14 @@ const ALLOWED_EXT = new Set([
     '.txt',
     '.html',
     '.htm',
+    '.json',
 ]);
 const DENY_NAMES = new Set([
     'readme.md',
     'live-preview.png',
     'live-preview.json',
     'live-timeline.json',
+    'library-manifest.jsonl',
     'thumbs.db',
     'desktop.ini',
     '.ds_store',
@@ -71,7 +76,8 @@ export function resolveFengxingDshHome() {
     }
     return join(productRoot(), 'dsh-home');
 }
-function isDeliverableFile(name) {
+/** Exported for unit tests. */
+export function isDeliverableFile(name) {
     const base = name.trim();
     if (!base || base.startsWith('.'))
         return false;
@@ -86,35 +92,110 @@ function isDeliverableFile(name) {
     const ext = extname(lower);
     return ALLOWED_EXT.has(ext);
 }
-function listDeliverableSources(runDir) {
+function listDirDeliverables(runDir, sub) {
+    const dir = join(runDir, sub);
+    if (!existsSync(dir))
+        return [];
+    let entries;
+    try {
+        entries = readdirSync(dir);
+    }
+    catch {
+        return [];
+    }
     const out = [];
-    for (const sub of DELIVERABLE_DIRS) {
-        const dir = join(runDir, sub);
-        if (!existsSync(dir))
+    for (const name of entries) {
+        if (!isDeliverableFile(name))
             continue;
-        let entries;
+        const full = join(dir, name);
         try {
-            entries = readdirSync(dir);
+            const st = statSync(full);
+            if (!st.isFile() || st.size <= 0)
+                continue;
         }
         catch {
             continue;
         }
-        for (const name of entries) {
-            if (!isDeliverableFile(name))
+        out.push(full);
+    }
+    return out;
+}
+/** Resolve manifest paths to absolute files still under runDir. Exported for tests. */
+export function listManifestDeliverables(runDir) {
+    const manifestPath = join(runDir, LIBRARY_MANIFEST);
+    if (!existsSync(manifestPath))
+        return [];
+    let body;
+    try {
+        body = readFileSync(manifestPath, 'utf8');
+    }
+    catch {
+        return [];
+    }
+    const runResolved = resolve(runDir);
+    const out = [];
+    const seen = new Set();
+    for (const line of body.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed)
+            continue;
+        let rel = '';
+        try {
+            const parsed = JSON.parse(trimmed);
+            if (typeof parsed.path === 'string')
+                rel = parsed.path.trim();
+        }
+        catch {
+            continue;
+        }
+        if (!rel || rel.includes('..') || rel.startsWith('/') || /^[a-zA-Z]:/.test(rel))
+            continue;
+        const full = resolve(runDir, rel);
+        const relCheck = relative(runResolved, full);
+        if (!relCheck || relCheck.startsWith('..'))
+            continue;
+        const key = full.toLowerCase();
+        if (seen.has(key))
+            continue;
+        if (!existsSync(full))
+            continue;
+        try {
+            const st = statSync(full);
+            if (!st.isFile() || st.size <= 0)
                 continue;
-            const full = join(dir, name);
-            try {
-                const st = statSync(full);
-                if (!st.isFile() || st.size <= 0)
-                    continue;
-            }
-            catch {
-                continue;
-            }
-            out.push(full);
+        }
+        catch {
+            continue;
+        }
+        if (!isDeliverableFile(basename(full)))
+            continue;
+        seen.add(key);
+        out.push(full);
+    }
+    return out;
+}
+/** Collect paths to promote. Exported for unit tests. */
+export function listPromoteSources(runDir) {
+    const out = [];
+    const seen = new Set();
+    const push = (full) => {
+        const key = full.toLowerCase();
+        if (seen.has(key))
+            return;
+        seen.add(key);
+        out.push(full);
+    };
+    for (const sub of ALWAYS_DIRS) {
+        for (const f of listDirDeliverables(runDir, sub)) {
+            push(f);
             if (out.length >= MAX_FILES)
                 return out;
         }
+    }
+    for (const f of listManifestDeliverables(runDir)) {
+        push(f);
+        if (out.length >= MAX_FILES)
+            return out;
     }
     return out;
 }
@@ -196,7 +277,7 @@ export function promoteRunDeliverables(opts) {
         return { outputs: [], marked: 0, skipped: 0 };
     }
     try {
-        const sources = listDeliverableSources(runDir);
+        const sources = listPromoteSources(runDir);
         if (sources.length === 0) {
             return { outputs: [], marked: 0, skipped: 0 };
         }

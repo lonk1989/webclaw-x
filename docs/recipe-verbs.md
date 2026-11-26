@@ -12,7 +12,7 @@
 
 | 用户说 | 正确 | 错误 |
 |--------|------|------|
-| 「打开 MES」「打开旧 MES」 | `webclaw_run`，recipe 如：`打开旧MES系统` 或 `登录旧MES系统`（保险箱有 URL 时） | 只调 `webclaw_accounts_*`；`Start-Process` / 默认浏览器打开 URL |
+| 「打开某某站」「登录某某」 | `webclaw_run`，recipe：`打开https://…` 或 `登录{保险箱站点名}`（名称须完全一致） | 只调 `webclaw_accounts_*`；臆造 EHR/MES/OA 等内置别名；`Start-Process` / 默认浏览器打开 URL |
 | 「打开 https://…」 | `webclaw_run`，recipe：`打开https://…` | Playwright / `open` / `xdg-open` / 让用户自己点 |
 | 「打开…，点确定，采集表格」 | **一整句**进一次 `webclaw_run` | 拆成多次 probe / 「测试：」小 run |
 | 跑到一半失败 | 仅廉价明确补丁可试 1 次；找不到控件/下载空等 →**立刻求助**。Agent 下载写 `等待下载30/60`，勿默认 200 | 空等 `等待下载200` 再猜；从登录整本重探；「测试：」串跑；ps1/裸 CDP |
@@ -20,15 +20,16 @@
 | 「有哪些网站账号」 | 才用 accounts 类工具（仅列表，无密码） | 用 accounts 代替「打开」 |
 
 `webclaw_accounts_status` / `webclaw_accounts_list`：**只查保险箱**，确认有没有站点 URL。  
-查到「旧MES」≠ 已经打开；查完必须再 `webclaw_run`。  
-**禁止**把查到的 URL 交给系统默认浏览器（Windows `Start-Process`、macOS `open`、Linux `xdg-open`）后对用户说「已打开」——那不是 webclaw 会话，后续点击/采集无法衔接。
+查到站点 ≠ 已经打开；查完必须再 `webclaw_run`。  
+**禁止**把查到的 URL 交给系统默认浏览器（Windows `Start-Process`、macOS `open`、Linux `xdg-open`）后对用户说「已打开」——那不是 webclaw 会话，后续点击/采集无法衔接。  
+**无内置站点别名**：OSS 不预置 EHR / MES / OA 等名称；`登录…` 只匹配本机保险箱里已有的站点名。
 
 ## 核心动词（中英同源）
 
 | 中文 | 英文 | 作用 | 示例 |
 |------|------|------|------|
-| 打开 | open | 导航到 URL 或保险箱站点名 | `打开https://a.com` / `打开旧MES系统` |
-| 登录 | （菜谱别名） | 打开保险箱里该站点的登录 URL | `登录EHR系统` |
+| 打开 | open | 导航到 URL 或保险箱站点名 | `打开https://a.com` / `打开{保险箱站点名}` |
+| 登录 | login | 打开保险箱里该站点的登录 URL | `登录{保险箱站点名}` |
 | 点击 | click | 点可见文字；无 `#N` 默认 `#1` | `点击确定`（= `#1`） / `点击确定#2` |
 | 输入 | type | 往焦点或目标填字 | `输入用户名=张三` |
 | 等待 | wait | **Agent 只写秒数**；人手菜谱仍可用智能等待 | Agent：`等待2` / `等待5`；人手：`等待加载` / `等待文字…` |
@@ -53,7 +54,7 @@
 多步用中文逗号 `，` 连成**一句菜谱**：
 
 ```text
-打开旧MES系统，登录旧MES系统，等待5，点击工单，采集表格
+打开https://example.com，等待5，点击确定，采集表格
 ```
 
 ```text
@@ -79,6 +80,7 @@ open https://example.com, wait 2, click Login, collect table
 | 仅查保险箱有哪些站 | `webclaw_accounts_list`（`all` 工具面）/ Host 的 accounts_status |
 | 人机验证码 | `webclaw_human_reply` |
 | 停长任务 | `webclaw_cancel` |
+| 清脏态 / 幽灵 HITL | **`webclaw_reset(soft\|hard)`** |
 | 关掉浏览器/实例 | **`webclaw_browser(action=stop)`**（禁止 PowerShell/`taskkill`） |
 | 用户接管 / 弹出浏览器 | **`webclaw_set_display(headless=false)`**，保持有头直到用户说隐藏/无头 | 跑完擅自改回无头；用 `webclaw_run(headless=…)` 覆盖持久配置 |
 | 隐藏浏览器 / 改成无头 | **`webclaw_set_display(headless=true)`** | 未获用户明确要求就改回无头 |
@@ -89,7 +91,7 @@ open https://example.com, wait 2, click Login, collect table
 
 ## 保险箱与密码
 
-- 菜谱写 `登录EHR系统` / `打开旧MES系统`（名称与保险箱一致即可）。
+- 菜谱写 `登录{保险箱站点名}` / `打开{保险箱站点名}`（名称与保险箱一致即可）；或直接 `打开https://…`。
 - **禁止**向用户要密码、禁止把密码写进对话或工具参数。
 - Host 导出约定见 [host-vault-export.md](./host-vault-export.md)。
 
@@ -98,5 +100,3 @@ open https://example.com, wait 2, click Login, collect table
 一键安装会把本说明书写到：
 
 `$WEBCLAW_HOME/mcp/RECIPE-VERBS.md`
-
-（Windows 默认 `%LOCALAPPDATA%\webclaw\mcp\RECIPE-VERBS.md`）

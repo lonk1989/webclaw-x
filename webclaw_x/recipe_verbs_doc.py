@@ -15,12 +15,12 @@ RECIPE_VERBS_MD = """# webclaw 菜谱动词说明书
 
 | 用户说 | 你调用 |
 |--------|--------|
-| 打开 MES / 打开旧MES | `webclaw_run`，recipe=`打开旧MES系统` 或 `登录旧MES系统` |
+| 打开某某 / 登录某某 | `webclaw_run`，recipe=`打开https://…` 或 `登录{保险箱站点名}`（须一致；无内置别名） |
 | 打开 https://a.com | `webclaw_run`，recipe=`打开https://a.com` |
 | 打开…，点确定，采集表格 | **一整句**一次 `webclaw_run` |
 | 有哪些网站账号 | 才用 accounts 列表工具 |
 
-查到保险箱 URL ≠ 已打开。禁止把 URL 丢给系统浏览器后说「已打开」。
+查到保险箱 URL ≠ 已打开。禁止把 URL 丢给系统浏览器后说「已打开」。无内置 EHR/MES/OA 别名。
 
 ## 动词
 
@@ -28,7 +28,7 @@ RECIPE_VERBS_MD = """# webclaw 菜谱动词说明书
 
 示例：
 ```
-打开旧MES系统，登录旧MES系统，等待5，点击工单，采集表格
+打开https://example.com，等待5，点击确定，采集表格
 ```
 
 等待（Agent）：只写「等待2/等待5」等秒数；禁止等待文字/加载/登录成功等目标。人手智能等待原样回放。

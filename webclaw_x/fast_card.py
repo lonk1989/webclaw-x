@@ -14,13 +14,13 @@ FAST_CARD = """\
 webclaw-x：确定性菜谱浏览器 RPA（CDP）。菜谱 = 动词指令 + 目标/参数；中英同源。
 
 【用户口语 → 你必须做什么】
-- 「打开 MES / 打开旧MES / 打开 https://… / 点确定 / 采集表格」→ 这些是菜谱动词，不是让你查账号。
-- 正确：立刻 webclaw_run(recipe="打开旧MES系统") 或把多步用中文逗号连成一句一次 run。
-- 错误（一律禁止）：只查 accounts 就结束；Start-Process / open / xdg-open / 默认浏览器；Playwright；裸 CDP/WebSocket/写 ps1 挖 DOM；把完整流程拆成多次「测试：」小 run。
+- 「打开某某 / 打开 https://… / 点确定 / 采集表格」→ 这些是菜谱动词，不是让你查账号。
+- 正确：立刻 webclaw_run(recipe="打开https://…" 或 "登录{保险箱站点名}")，或把多步用中文逗号连成一句一次 run。站点名必须与保险箱完全一致；无内置 EHR/MES/OA 等别名。
+- 错误（一律禁止）：只查 accounts 就结束；Start-Process / open / xdg-open / 默认浏览器；Playwright；裸 CDP/WebSocket/写 ps1 挖 DOM；把完整流程拆成多次「测试：」小 run；臆造内置站点名。
 - 查到保险箱 URL ≠ 已用 webclaw 打开；禁止把 URL 丢给系统浏览器后跟用户说「已打开」。
 
-【常用动词】打开/open · 登录(保险箱别名) · 点击/click · 输入/type · 等待/wait · 采集/collect · 刷新/reload · 截图/screenshot · 滚动/scroll · 按/press · 参数/param
-示例：打开旧MES系统，登录旧MES系统，等待5，点击工单，采集表格
+【常用动词】打开/open · 登录(保险箱站点名) · 点击/click · 输入/type · 等待/wait · 采集/collect · 刷新/reload · 截图/screenshot · 滚动/scroll · 按/press · 参数/param
+示例：打开https://example.com，等待5，点击确定，采集表格
 等待（Agent）：只写秒数「等待2/等待5」；禁止「等待文字…/等待加载/等待登录成功」等目标。人手冻结菜谱里的智能等待原样回放。
 下载（Agent）：写「等待下载30」或「等待下载60」，禁止默认「等待下载200」——空等太久才失败等于晚求助。
 眼睛：只用 webclaw_probe / 菜谱「采集…」。禁止自写 PowerShell/JS 脚本连 19222 挖页面。
@@ -36,9 +36,13 @@ webclaw-x：确定性菜谱浏览器 RPA（CDP）。菜谱 = 动词指令 + 目�
 5. 禁止：从登录整本重探；「测试：」碎片 run；裸 CDP/ps1；Playwright/CSS。
 6. 点击：不写 #N=默认 #1。密码不进菜谱。含「参数名=值」→运行前先让用户确认/改默认（Host 弹窗或 needParams 表），禁止静默用占位值开跑。失败补丁/重跑复用已确认 params，禁止再问一遍或清空。
 7. 试探：`(点击取消?)` / `（点击已有？点击新建）` 是合法语法（失败跳过或走备选），必须原样保留，禁止当注释删掉。
-8. 长停 webclaw_cancel；关浏览器 webclaw_browser(action=stop)。
+8. 长停 webclaw_cancel；关浏览器只用 webclaw_browser(action=stop)。单 Chrome 多 tab，禁止为并行再启浏览器。
+9. 自愈（开跑前/卡死时）：webclaw_status 看 busy / waitingHuman / cancelMarkerPresent / orphanRisk。
+   - 用户要新任务且仍 busy/HITL：先 webclaw_cancel；仍脏 → webclaw_reset(soft|hard)。弃聊验证码不要换会话硬开 run（跨会话 human_reply 不做）。
+   - RUN_BUSY / 幽灵「已取消」：cancel → status；仍异常 → reset → 再 run。
+   - 工具结果含 phase / userMessage / preview：必须转述给用户（侧栏执行画面或 preview 路径），禁止无图空喊「请看浏览器」。
 
-【核心工具】status / run / probe / freeze / list_recipes / human_reply / cancel / set_display / browser
+【核心工具】status / run / probe / freeze / list_recipes / human_reply / cancel / set_display / browser / reset
 说明书：docs/recipe-verbs.md（安装后亦在 $WEBCLAW_HOME/mcp/RECIPE-VERBS.md）
 """
 

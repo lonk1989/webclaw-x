@@ -62,8 +62,8 @@ mod tests {
     #[test]
     fn replaces_known_fields() {
         let systems = vec![WebSystem {
-            id: "ehr".into(),
-            name: "EHR系统".into(),
+            id: "demo".into(),
+            name: "演示系统".into(),
             kind: super::super::store::WebSystemKind::Internal,
             url: "https://example.com/".into(),
             username: "user1".into(),
@@ -74,7 +74,7 @@ mod tests {
             remote_status: None,
             has_password: true,
         }];
-        let input = "打开{{ehr.url}}login，输入手机={{ehr.账号}}";
+        let input = "打开{{demo.url}}login，输入手机={{demo.账号}}";
         let out = substitute_with_systems(input, &systems);
         assert_eq!(out, "打开https://example.com/login，输入手机=user1");
     }

@@ -19,9 +19,6 @@
         recipesRel: recipes
         # binaryPath: 'E:/Workspace/webclaw-x/target/release/webclaw-lite.exe'
         # systems:
-        #   - id: ehr
-        #     name: EHR系统
-        #     url: https://example.com/ehr-login
-        #   - id: old-mes
-        #     name: 旧MES系统
-        #     url: https://example.com/mes-login
+        #   - id: my-app
+        #     name: 演示系统
+        #     url: https://example.com/login

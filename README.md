@@ -5,7 +5,7 @@
 菜谱 = **指令（动词）** + **目标/参数**；中英动词同一回放路径（如 `打开`/`open`、`等待`/`wait`、`采集`/`collect`）。
 
 > 仓库：<https://github.com/lonk1989/webclaw-x>  
-> 当前发布：[v0.2.4](https://github.com/lonk1989/webclaw-x/releases/tag/v0.2.4)  
+> 当前发布：[v0.2.5](https://github.com/lonk1989/webclaw-x/releases/tag/v0.2.5)  
 > 打 `v*` 标签后 GitHub Actions（`.github/workflows/release.yml`）会构建并上传 **Windows x64 / macOS arm64 / Linux x64** 预编译；也可在 Actions 里对已有 tag 手动 Run workflow。
 
 ---
@@ -50,16 +50,18 @@ AI 助手操作网页时，常见两条路：
 | 本地或可控环境的业务回放 | 企业级云端会话托管、多租户 SaaS |
 | fixture → 冻结菜谱 → 反复跑 | 每一步都靠模型现场猜选择器 |
 | 需要域名白名单、取消、人审的场景 | 绕过站点安全策略或自动化猜验证码 |
+| **单 Chrome 多 tab**（省内存、复用登录态） | 多 Agent 各拉一只 Chrome 并行抢页 |
 
-非目标（详见 [FORK.md](./FORK.md)）：不重写 CDP 运行时；不把 MCP Host 与 `webclaw-lite` 揉成单进程；仓库不携带真实业务凭据。
+非目标（详见 [FORK.md](./FORK.md)）：不重写 CDP 运行时；不把 MCP Host 与 `webclaw-lite` 揉成单进程；仓库不携带真实业务凭据；**不做跨会话 `human_reply`**（弃聊验证码请 `webclaw_cancel` / `webclaw_reset`）。
 
 ## 核心能力
 
-- **MCP 网关**（`webclaw_x`）：统一工具信封、脱敏、任务取消、参数确认门禁
+- **MCP 网关**（`webclaw_x`）：统一工具信封、脱敏、任务取消、参数确认门禁、`webclaw_reset` 清障
 - **`webclaw-lite` 引擎**（Rust，子进程）：菜谱解析与 Chrome CDP 执行
 - **中英菜谱**：同一套动词语义；示例见 [`recipes/fixture-table.webclaw`](./recipes/fixture-table.webclaw) 与 [`.en` 版](./recipes/fixture-table.en.webclaw)
-- **默认 core7 工具面**：`status` / `run` / `probe` / `freeze` / `list_recipes` / `human_reply` / `cancel`；完整目录设 `WEBCLAW_TOOLS=all`
+- **默认 core 工具面**：`status` / `run` / `probe` / `freeze` / `list_recipes` / `human_reply` / `cancel` / `set_display` / `browser` / `reset`；完整目录设 `WEBCLAW_TOOLS=all`
 - **安全门禁**：导航域名白名单（**默认关闭**，可按需开启）、`NEED_HUMAN` 人审续跑、`webclaw_cancel` 可停长任务、模板参数须 `params_confirmed`
+- **Live 感知**：无头也靠侧栏「执行画面」+ 工具结果 `phase` / `userMessage` / `preview`；`status` 暴露 `busy` / `waitingHuman` / `cancelMarkerPresent`
 - **产物双写**：采集步骤可同时写出 Markdown / JSON / CSV（见运行产物目录）
 
 新助手请只读一页上手：[`skills/SKILL.md`](./skills/SKILL.md)。
@@ -152,7 +154,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 | `webclaw-lite-macos-arm64` (+ `.sha256`) | macOS Apple Silicon |
 | `webclaw-lite-linux-x64` (+ `.sha256`) | Linux x86_64（CI 用 Ubuntu 24.04；需 glibc ≥ 2.38） |
 
-也可在 GitHub → Actions → **release** → Run workflow，填已有 tag（如 `v0.2.4`）补传资产。本仓 **不做** npm publish（那是 oss 插件路径）。
+也可在 GitHub → Actions → **release** → Run workflow，填已有 tag（如 `v0.2.5`）补传资产。本仓 **不做** npm publish（那是 oss 插件路径）。
 
 ---
 

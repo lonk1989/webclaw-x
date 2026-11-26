@@ -161,7 +161,7 @@ async fn connect_foreground_client<R: Runtime>(
     activate: bool,
 ) -> Result<(CdpClient, String), String> {
     // 与临时步骤一致：先确保共用调试 Chrome 就绪
-    let _ = chrome::ensure_debug_chrome_ready(&state.chrome_child, false).await?;
+    let _ = chrome::ensure_debug_chrome_ready(&state.chrome_child, false, None).await?;
     if !chrome::is_debug_port_ready_on(chrome::DEBUG_PORT).await {
         return Err("请先启动 Debug Chrome 并打开目标页".into());
     }

@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": ".tmp-test",
+    "declaration": false
+  },
+  "include": ["src/promote-outputs.ts", "src/promote-outputs.test.ts"],
+  "exclude": []
+}

@@ -127,8 +127,9 @@
 - 原子 temp+replace、文件权限 0600；`jobs/.lock` 是稳定的 flock inode，**结束后保留是正常的**，不是僵尸任务。
 - 同一 home 的存活任务拒绝第二个 run：`RUN_BUSY`。只串行化短生命周期事务，不等待其他 run 执行完毕。进程死亡后清理陈旧记录并允许启动；Linux 额外用 `/proc` starttime 避免 PID 复用误杀，并排除 zombie。
 - 取消先写每任务 `.cancel` 回执及原生 `control/cancel`；SIGTERM → 等 0.5 秒 → SIGKILL → 最多再等 2 秒。保留存活任务的注册信息，不把终止失败冒充成功。
-- done/失败/timeout/cancel 清理 JSON；HITL 返回后即使 Host 不再 collect，watchdog 仍在超时/退出时清理。跨会话 cancel 可用，**跨会话 human_reply 尚未实现**（原进程内 prompt/collect 状态仍需长会话）。
-- 单机、同 home、所有 gateway 升级才受保护；直接运行 lite、不同 home 或网络文件系统不在本轮互斥保证内。
+- done/失败/timeout/cancel 清理 JSON；HITL 返回后即使 Host 不再 collect，watchdog 仍在超时/退出时清理。跨会话 cancel 可用，**跨会话 human_reply 不做**（弃聊验证码请同会话 `human_reply`，或 `webclaw_cancel` / `webclaw_reset(soft|hard)` 清障后再开新 run）。
+- `webclaw_status`（fast）暴露 `busy` / `activeRun` / `waitingHuman` / `needHuman` / `cancelMarkerPresent`；Agent 自愈：`status → cancel → reset → run`。
+- 单机、同 home、所有 gateway 升级才受保护；直接运行 lite、不同 home 或网络文件系统不在本轮互斥保证内。单 Chrome 多 tab，勿为并行再拉实例。
 
 ## 结构化信封与兼容迁移
 

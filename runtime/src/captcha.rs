@@ -73,9 +73,127 @@ impl LoginFormSnapshot {
         }
     }
 
-    pub fn has_credentials(&self) -> bool {
-        self.phone.is_some() || self.password.is_some()
+    pub fn has_account(&self) -> bool {
+        self.phone
+            .as_ref()
+            .is_some_and(|s| !s.trim().is_empty())
     }
+
+    pub fn has_password(&self) -> bool {
+        self.password
+            .as_ref()
+            .is_some_and(|s| !s.trim().is_empty())
+    }
+
+    /// Anything worth attempting to refill (account and/or password).
+    pub fn has_credentials(&self) -> bool {
+        self.has_account() || self.has_password()
+    }
+}
+
+/// Why login is still stuck after captcha submit — drives HITL vs abort.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StuckLoginKind {
+    /// Captcha widget gone / left login — treat as cleared.
+    Cleared,
+    /// Likely wrong/expired captcha — OK to ask human again.
+    Captcha,
+    /// Snapshot has no password but page shows a password field.
+    MissingPassword,
+    /// Page tip says account/password wrong.
+    Credential(String),
+}
+
+async fn classify_stuck_after_submit(
+    client: &mut CdpClient,
+    login_form: &LoginFormSnapshot,
+) -> Result<(StuckLoginKind, String), String> {
+    if detect(client).await?.is_none() {
+        return Ok((StuckLoginKind::Cleared, String::new()));
+    }
+
+    let v = client
+        .evaluate_resilient(
+            r#"(() => {
+  const isVisible = (el) => {
+    if (!el || !(el instanceof Element)) return false;
+    const s = window.getComputedStyle(el);
+    if (s.display === 'none' || s.visibility === 'hidden' || Number(s.opacity) === 0) return false;
+    const r = el.getBoundingClientRect();
+    return r.width >= 2 && r.height >= 2;
+  };
+  const pickPwd = () => {
+    const nodes = document.querySelectorAll('input[type="password"]');
+    for (const el of nodes) if (isVisible(el)) return el;
+    return null;
+  };
+  const tipSelectors = [
+    '.el-form-item__error', '.el-message--error', '.el-alert--error',
+    '.ant-form-item-explain-error', '.ant-message-error', '.ant-alert-error',
+    '[role="alert"]', '.login-tip', '.login-error', '.error-tip', '.error-msg', '#err'
+  ];
+  let tip = '';
+  for (const sel of tipSelectors) {
+    for (const el of document.querySelectorAll(sel)) {
+      if (!isVisible(el)) continue;
+      const t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (t) { tip = t.slice(0, 120); break; }
+    }
+    if (tip) break;
+  }
+  const pwd = pickPwd();
+  return {
+    tip,
+    pwdLen: pwd ? String(pwd.value || '').length : -1,
+    hasPwdField: !!pwd,
+  };
+})()"#,
+        )
+        .await
+        .unwrap_or(serde_json::json!({}));
+
+    let tip = v
+        .get("tip")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let pwd_len = v.get("pwdLen").and_then(|x| x.as_i64()).unwrap_or(-1);
+    let has_pwd_field = v
+        .get("hasPwdField")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(pwd_len >= 0);
+
+    let diag = format!("tip={tip:?} pwdLen={pwd_len} hasPwdField={has_pwd_field}");
+
+    if crate::login_verify::looks_like_captcha_error(&tip) {
+        return Ok((StuckLoginKind::Captcha, diag));
+    }
+    if crate::login_verify::looks_like_credential_error(&tip) {
+        return Ok((
+            StuckLoginKind::Credential(crate::login_verify::friendly_failure_message(
+                &tip, "page_tip",
+            )),
+            diag,
+        ));
+    }
+    // Password form present but we never captured a password for refill
+    // (e.g. recipe only typed account then clicked 登录).
+    if has_pwd_field && !login_form.has_password() {
+        return Ok((StuckLoginKind::MissingPassword, diag));
+    }
+    if has_pwd_field && pwd_len == 0 && login_form.has_password() {
+        // Refill failed to stick — still a credential/setup issue, not captcha OCR.
+        return Ok((
+            StuckLoginKind::Credential(
+                "登录失败：密码未写入页面。请改用「登录{保险箱站点名}」，或在设置 → 网站账号核对密码后重试。"
+                    .into(),
+            ),
+            diag,
+        ));
+    }
+
+    Ok((StuckLoginKind::Captcha, diag))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -770,6 +888,41 @@ async fn fill_captcha(client: &mut CdpClient, selector: &str, code: &str) -> Res
     Err("验证码未能写入输入框（Ant/React 受控组件未接受）".into())
 }
 
+/// Fill captcha, optionally refill login credentials, then ensure the captcha
+/// field still holds `code` (some sites clear it when account/password are rewritten).
+async fn fill_captcha_then_refill_credentials(
+    client: &mut CdpClient,
+    selector: &str,
+    code: &str,
+    login_form: &LoginFormSnapshot,
+    retry_login: bool,
+    push_log: &impl Fn(String),
+) -> Result<(), String> {
+    fill_captcha(client, selector, code).await?;
+    if !captcha_value_matches(client, code).await.unwrap_or(false) {
+        return Err("验证码写入后校验失败，页面输入框仍为空".into());
+    }
+    push_log("验证码已填入浏览器".into());
+
+    if !(retry_login && login_form.has_credentials()) {
+        return Ok(());
+    }
+    refill_login_form(client, login_form).await?;
+    let refill_note = match (login_form.has_account(), login_form.has_password()) {
+        (true, true) => "已重新填入账号与密码",
+        (true, false) => "已重新填入账号（本轮无密码可回填）",
+        (false, true) => "已重新填入密码（本轮无账号可回填）",
+        (false, false) => "跳过凭据回填",
+    };
+    push_log(refill_note.into());
+    // 回填后重新确认验证码仍在（部分站点会清空）
+    if !captcha_value_matches(client, code).await.unwrap_or(false) {
+        fill_captcha(client, selector, code).await?;
+        push_log("回填账号后验证码被清空，已重新写入".into());
+    }
+    Ok(())
+}
+
 async fn refill_login_form(client: &mut CdpClient, creds: &LoginFormSnapshot) -> Result<(), String> {
     if !creds.has_credentials() {
         return Ok(());
@@ -1080,7 +1233,169 @@ fn captcha_ocr_min_confidence() -> f32 {
         .unwrap_or(0.60)
 }
 
+fn is_arithmetic_expr_char(c: char) -> bool {
+    c.is_ascii_digit() || matches!(c, '+' | '-' | '*' | '/' | '=' | '?' | ' ')
+}
+
+/// Normalize OCR noise for arithmetic captchas, then evaluate a binary expression.
+/// Supports `3+5=?` / `12-4` / `3x5` / `8÷2` (exact integer division only).
+/// Returns the decimal answer string when confident; otherwise None → alnum path.
+///
+/// Conservative gates: reject when non-expression junk dominates the raw OCR, and
+/// require a clean `digit OP digit` compact form (stops noise like invented `6*7`).
+fn try_eval_arithmetic_captcha(raw: &str) -> Option<String> {
+    // Flatten + map common OCR / fullwidth glyphs to ASCII ops / digits.
+    let mut flat = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        let mapped = match c {
+            '＋' | '﹢' => '+',
+            '－' | '−' | '—' | '–' => '-',
+            '×' | '✕' | '✖' | '＊' | 'x' | 'X' | 'ｘ' | 'Ｘ' => '*',
+            '÷' | '∕' | '／' => '/',
+            '＝' => '=',
+            '？' | '?' => '?',
+            // Fullwidth digits ０-９
+            '０'..='９' => char::from(b'0' + (c as u32 - '０' as u32) as u8),
+            other if other.is_ascii_whitespace() || other == '\u{3000}' => ' ',
+            other => other,
+        };
+        flat.push(mapped);
+    }
+
+    let mut expr_chars = 0usize;
+    let mut junk_chars = 0usize;
+    for c in flat.chars() {
+        if c.is_ascii_whitespace() {
+            continue;
+        }
+        if is_arithmetic_expr_char(c) {
+            expr_chars += 1;
+        } else {
+            junk_chars += 1;
+        }
+    }
+    // Chinese / letter garbage dominating → do not invent an expression.
+    if junk_chars > expr_chars {
+        return None;
+    }
+
+    // Keep digits, ops, '=', '?'; drop other noise (labels like "结果").
+    let expr: String = flat.chars().filter(|c| is_arithmetic_expr_char(*c)).collect();
+    let expr = expr.trim();
+    if expr.is_empty() {
+        return None;
+    }
+
+    // Take left of '=' / '?' so "3+5=8" / "3+5=?" still evaluate 3+5.
+    let left = expr
+        .split(|c| c == '=' || c == '?')
+        .next()
+        .unwrap_or(expr)
+        .trim();
+    if left.is_empty() {
+        return None;
+    }
+
+    // Compact spaces for scanning.
+    let compact: String = left.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    if compact.is_empty() {
+        return None;
+    }
+
+    // Clean binary form only: optional leading '-', 1–4 digit LHS, one op, 1–4 digit RHS.
+    // Rejects fragments like "*1" / "x1" and multi-op noise.
+    {
+        let b = compact.as_bytes();
+        let mut i = 0usize;
+        if b.first() == Some(&b'-') {
+            i = 1;
+        }
+        let dig_start = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        let lhs_digits = i - dig_start;
+        if !(1..=4).contains(&lhs_digits) || i >= b.len() {
+            return None;
+        }
+        if !matches!(b[i], b'+' | b'-' | b'*' | b'/') {
+            return None;
+        }
+        i += 1;
+        let rhs_start = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        let rhs_digits = i - rhs_start;
+        if i != b.len() || !(1..=4).contains(&rhs_digits) {
+            return None;
+        }
+    }
+
+    // Find the binary operator: first +*/ after an initial optional '-', or a
+    // '-' that is not the leading sign (i.e. after at least one digit).
+    let bytes = compact.as_bytes();
+    let mut op_idx: Option<usize> = None;
+    let mut i = 0usize;
+    if bytes.first() == Some(&b'-') {
+        i = 1; // skip leading sign on LHS
+    }
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' | b'*' | b'/' => {
+                op_idx = Some(i);
+                break;
+            }
+            b'-' if i > 0 && bytes[i - 1].is_ascii_digit() => {
+                op_idx = Some(i);
+                break;
+            }
+            b'0'..=b'9' => {}
+            _ => return None,
+        }
+        i += 1;
+    }
+    let op_at = op_idx?;
+    if op_at == 0 || op_at + 1 >= compact.len() {
+        return None;
+    }
+    let (left_s, rest) = compact.split_at(op_at);
+    let op = rest.as_bytes()[0] as char;
+    let right_s = &rest[1..];
+    if left_s.is_empty() || right_s.is_empty() {
+        return None;
+    }
+    let a: i32 = left_s.parse().ok()?;
+    let b: i32 = right_s.parse().ok()?;
+
+    let result = match op {
+        '+' => a.checked_add(b)?,
+        '-' => a.checked_sub(b)?,
+        '*' => a.checked_mul(b)?,
+        '/' => {
+            if b == 0 {
+                return None;
+            }
+            // Captchas expect whole numbers; reject non-exact division.
+            if a % b != 0 {
+                return None;
+            }
+            a / b
+        }
+        _ => return None,
+    };
+
+    // Sensible captcha answer range (avoid OCR garbage → huge products).
+    if !(-999..=9999).contains(&result) {
+        return None;
+    }
+    Some(result.to_string())
+}
+
 fn sanitize_captcha_ocr_text(raw: &str) -> Option<String> {
+    if let Some(ans) = try_eval_arithmetic_captcha(raw) {
+        return Some(ans);
+    }
     let cleaned: String = raw
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
@@ -1099,7 +1414,14 @@ enum CaptchaOcrOutcome {
     Timeout,
     LowConfidence { score: f32, raw: String },
     BadRead { raw: String },
-    Ok { code: String, score: f32 },
+    Ok {
+        code: String,
+        score: f32,
+        /// Engine raw text before sanitize (for logs / diagnosis).
+        raw: String,
+        /// `CAPTCHA_OCR` (ddddocr) or `RAPIDOCR`
+        engine: &'static str,
+    },
 }
 
 impl CaptchaOcrOutcome {
@@ -1110,7 +1432,7 @@ impl CaptchaOcrOutcome {
             Self::Timeout => "OCR_TIMEOUT",
             Self::LowConfidence { .. } => "OCR_LOW_CONFIDENCE",
             Self::BadRead { .. } => "OCR_BAD_READ",
-            Self::Ok { .. } => "OCR_OK",
+            Self::Ok { engine, .. } => engine,
         }
     }
 }
@@ -1126,28 +1448,67 @@ fn captcha_ocr_timeout_ms() -> u64 {
         .unwrap_or(20_000)
 }
 
-/// RapidOCR timed try-recognize; confidence gate + stable error codes (fallback HITL).
+fn score_captcha_ocr_outcome(
+    scored: crate::rhai_runtime::local_ocr::OcrBytesResult,
+    min_conf: f32,
+    engine: &'static str,
+) -> CaptchaOcrOutcome {
+    let raw = scored.text.clone();
+    let score = scored.mean_score;
+    match sanitize_captcha_ocr_text(&raw) {
+        Some(code) if score + f32::EPSILON >= min_conf => CaptchaOcrOutcome::Ok {
+            code,
+            score,
+            raw,
+            engine,
+        },
+        Some(_) => CaptchaOcrOutcome::LowConfidence { score, raw },
+        None => CaptchaOcrOutcome::BadRead { raw },
+    }
+}
+
+fn captcha_specialized_enabled() -> bool {
+    match std::env::var("WEBCLAW_CAPTCHA_SPECIALIZED").ok().as_deref() {
+        Some("0") | Some("false") | Some("False") | Some("no") | Some("off") => false,
+        _ => true,
+    }
+}
+
+/// Specialized captcha OCR first (ddddocr ONNX); RapidOCR fallback; then HITL upstream.
 async fn try_ocr_captcha_outcome(png: &[u8]) -> CaptchaOcrOutcome {
     if !captcha_ocr_enabled() {
         return CaptchaOcrOutcome::Disabled;
     }
-    if !crate::rhai_runtime::local_ocr::ocr_models_ready() {
-        return CaptchaOcrOutcome::Unavailable;
-    }
     let min_conf = captcha_ocr_min_confidence();
     let budget_ms = captcha_ocr_timeout_ms();
 
-    fn score_outcome(
-        scored: crate::rhai_runtime::local_ocr::OcrBytesResult,
-        min_conf: f32,
-    ) -> CaptchaOcrOutcome {
-        let raw = scored.text.clone();
-        let score = scored.mean_score;
-        match sanitize_captcha_ocr_text(&raw) {
-            Some(code) if score + f32::EPSILON >= min_conf => CaptchaOcrOutcome::Ok { code, score },
-            Some(_) => CaptchaOcrOutcome::LowConfidence { score, raw },
-            None => CaptchaOcrOutcome::BadRead { raw },
+    // 1) Captcha-specialized model (does not require RapidOCR models).
+    if captcha_specialized_enabled()
+        && (crate::rhai_runtime::captcha_ocr::captcha_ocr_ready()
+            || crate::rhai_runtime::captcha_ocr::ensure_captcha_models().is_ok())
+    {
+        let png_c = png.to_vec();
+        let specialized = tokio::task::spawn_blocking(move || {
+            crate::rhai_runtime::captcha_ocr::ocr_captcha_bytes_scored(&png_c)
+        })
+        .await;
+        match specialized {
+            Ok(Ok(scored)) => {
+                let out = score_captcha_ocr_outcome(scored, min_conf, "CAPTCHA_OCR");
+                if matches!(out, CaptchaOcrOutcome::Ok { .. }) {
+                    return out;
+                }
+                // Fall through to RapidOCR on low/bad specialized read.
+            }
+            Ok(Err(_)) | Err(_) => {
+                // Specialized unavailable → RapidOCR.
+            }
         }
+    }
+
+    // 2) RapidOCR fallback (general document OCR).
+    if !crate::rhai_runtime::local_ocr::ocr_models_ready() {
+        return CaptchaOcrOutcome::Unavailable;
     }
 
     // Unbounded first attempt warms ORT/DirectML and may already succeed. A timed
@@ -1159,7 +1520,7 @@ async fn try_ocr_captcha_outcome(png: &[u8]) -> CaptchaOcrOutcome {
     .await;
     match warm {
         Ok(Ok(scored)) => {
-            let out = score_outcome(scored, min_conf);
+            let out = score_captcha_ocr_outcome(scored, min_conf, "RAPIDOCR");
             if matches!(out, CaptchaOcrOutcome::Ok { .. }) {
                 return out;
             }
@@ -1175,7 +1536,7 @@ async fn try_ocr_captcha_outcome(png: &[u8]) -> CaptchaOcrOutcome {
         crate::rhai_runtime::local_ocr::ocr_image_bytes_scored(&png)
     });
     match tokio::time::timeout(Duration::from_millis(budget_ms), fut).await {
-        Ok(Ok(Ok(scored))) => score_outcome(scored, min_conf),
+        Ok(Ok(Ok(scored))) => score_captcha_ocr_outcome(scored, min_conf, "RAPIDOCR"),
         Ok(Ok(Err(_))) => CaptchaOcrOutcome::Unavailable,
         Ok(Err(_)) => CaptchaOcrOutcome::Unavailable,
         Err(_) => CaptchaOcrOutcome::Timeout,
@@ -1225,7 +1586,12 @@ pub async fn resolve_if_present<R: Runtime>(
         let ocr = try_ocr_captcha_outcome(&png).await;
         let mut from_ocr = false;
         let code = match &ocr {
-            CaptchaOcrOutcome::Ok { code, score } => {
+            CaptchaOcrOutcome::Ok {
+                code,
+                score,
+                raw,
+                engine,
+            } => {
                 // Same code on a supposedly-new image is a stale-read smell → HITL.
                 if !last_ocr_code.is_empty() && last_ocr_code == *code {
                     push_log(format!(
@@ -1244,9 +1610,9 @@ pub async fn resolve_if_present<R: Runtime>(
                 } else {
                     from_ocr = true;
                     last_ocr_code = code.clone();
+                    let raw_short: String = raw.chars().take(48).collect();
                     push_log(format!(
-                        "验证码 OCR 试填：{code} conf={score:.2} [{}]",
-                        ocr.code_tag()
+                        "验证码 OCR 试填：{code} conf={score:.2} [{engine}] raw={raw_short:?}"
                     ));
                     code.clone()
                 }
@@ -1263,7 +1629,9 @@ pub async fn resolve_if_present<R: Runtime>(
                         captcha_ocr_min_confidence()
                     ),
                     CaptchaOcrOutcome::BadRead { raw } => {
-                        format!("OCR_BAD_READ raw={raw:?}（非 3–8 位字母数字）")
+                        format!(
+                            "OCR_BAD_READ raw={raw:?}（非干净算术式且非 3–8 位字母数字）"
+                        )
                     }
                     CaptchaOcrOutcome::Ok { .. } => unreachable!(),
                 };
@@ -1285,21 +1653,15 @@ pub async fn resolve_if_present<R: Runtime>(
             .unwrap_or("input[placeholder*=\"验证码\"]");
 
         // 先填验证码，再回填账号密码，避免 refill 抢焦点导致码被冲掉
-        fill_captcha(client, selector, &code).await?;
-        if !captcha_value_matches(client, &code).await.unwrap_or(false) {
-            return Err("验证码写入后校验失败，页面输入框仍为空".into());
-        }
-        push_log("验证码已填入浏览器".into());
-
-        if retry_login && login_form.has_credentials() {
-            refill_login_form(client, login_form).await?;
-            push_log("已重新填入账号与密码".into());
-            // 回填后重新确认验证码仍在（部分站点会清空）
-            if !captcha_value_matches(client, &code).await.unwrap_or(false) {
-                fill_captcha(client, selector, &code).await?;
-                push_log("回填账号后验证码被清空，已重新写入".into());
-            }
-        }
+        fill_captcha_then_refill_credentials(
+            client,
+            selector,
+            &code,
+            login_form,
+            retry_login,
+            &push_log,
+        )
+        .await?;
 
         // OCR 默认试填并提交；失败则下一轮回落 HITL。SUBMIT=0 时才「只填不交」等人确认。
         let allow_auto_submit = !from_ocr || captcha_ocr_submit_enabled();
@@ -1342,54 +1704,62 @@ pub async fn resolve_if_present<R: Runtime>(
             wait_slider_if_present(app, waiters, task_id, client, cancel, &push_log).await?;
         }
 
-        // Diagnose stuck-on-login after fill+click (fixture/HITL).
-        if let Ok(v) = client
-            .evaluate_resilient(
-                r#"(() => {
-  const captcha = document.querySelector('#captcha, input[name=captcha], input[placeholder*=\"验证码\"]');
-  const user = document.querySelector('#user, input[name=user], input[placeholder*=\"账号\"]');
-  const pwd = document.querySelector('#pwd, input[type=password]');
-  const err = document.getElementById('err');
-  return {
-    url: location.href,
-    title: document.title || '',
-    captchaLen: captcha ? String(captcha.value||'').length : -1,
-    captchaVal: captcha ? String(captcha.value||'') : null,
-    userLen: user ? String(user.value||'').length : -1,
-    pwdLen: pwd ? String(pwd.value||'').length : -1,
-    errShown: !!(err && getComputedStyle(err).display !== 'none'),
-    errText: err ? String(err.textContent||'').trim() : ''
-  };
-})()"#,
-            )
-            .await
-        {
-            push_log(format!(
-                "验证码提交后页面：url={} captchaLen={} userLen={} pwdLen={} errShown={} errText={:?}",
-                v.get("url").and_then(|x| x.as_str()).unwrap_or("?"),
-                v.get("captchaLen").and_then(|x| x.as_i64()).unwrap_or(-1),
-                v.get("userLen").and_then(|x| x.as_i64()).unwrap_or(-1),
-                v.get("pwdLen").and_then(|x| x.as_i64()).unwrap_or(-1),
-                v.get("errShown").and_then(|x| x.as_bool()).unwrap_or(false),
-                v.get("errText").and_then(|x| x.as_str()).unwrap_or("")
-            ));
-        }
-
         {
             let mut settle = LiveWaitPreview::new("验证码");
             let _ = settle
                 .sleep_tick(Duration::from_millis(800), Some(cancel), Some(client))
                 .await;
         }
-        if detect(client).await?.is_none() {
-            push_log("验证码已通过".into());
-            wait_slider_if_present(app, waiters, task_id, client, cancel, &push_log).await?;
-            return Ok(());
+
+        // Distinguish credential/setup failures from captcha retries — do not
+        // keep asking humans for captcha when the password was never filled.
+        let (stuck, diag) = classify_stuck_after_submit(client, login_form).await?;
+        push_log(format!("登录提交后诊断：{stuck:?} | {diag}"));
+        match stuck {
+            StuckLoginKind::Cleared => {
+                push_log("验证码已通过".into());
+                wait_slider_if_present(app, waiters, task_id, client, cancel, &push_log).await?;
+                return Ok(());
+            }
+            StuckLoginKind::MissingPassword => {
+                return Err(
+                    "登录失败：页面需要密码，但本轮未从保险箱/菜谱取得密码（常见于只「输入账号」再点登录）。请改用「登录{保险箱站点名}」，或在设置 → 网站账号填写密码后重试。"
+                        .into(),
+                );
+            }
+            StuckLoginKind::Credential(msg) => return Err(msg),
+            StuckLoginKind::Captcha => {
+                // Continue OCR/HITL rounds with an accurate hint (not "OCR failed").
+                if round + 1 < MAX_OCR_ROUNDS {
+                    push_log(format!(
+                        "仍停在登录页且未见明确密码错误，将重试验证码（第 {}/{} 轮）",
+                        round + 2,
+                        MAX_OCR_ROUNDS
+                    ));
+                }
+            }
         }
     }
 
-    // OCR 自动试填用尽：回落人工（必须给人看「当前」验证码图，而不是旧帧）。
-    push_log("验证码 OCR 多次未通过，改为请求人工输入".into());
+    // Rounds exhausted while captcha still present — classify once more before HITL.
+    let (stuck, diag) = classify_stuck_after_submit(client, login_form).await?;
+    push_log(format!("验证码轮次结束诊断：{stuck:?} | {diag}"));
+    match stuck {
+        StuckLoginKind::Cleared => {
+            wait_slider_if_present(app, waiters, task_id, client, cancel, &push_log).await?;
+            return Ok(());
+        }
+        StuckLoginKind::MissingPassword => {
+            return Err(
+                "登录失败：页面需要密码，但本轮未取得密码。请改用「登录{保险箱站点名}」或在设置 → 网站账号填写密码。"
+                    .into(),
+            );
+        }
+        StuckLoginKind::Credential(msg) => return Err(msg),
+        StuckLoginKind::Captcha => {}
+    }
+
+    push_log("登录仍未成功且验证码仍在，改为请求人工输入验证码".into());
     let Some(info) = detect(client).await? else {
         wait_slider_if_present(app, waiters, task_id, client, cancel, &push_log).await?;
         return Ok(());
@@ -1405,7 +1775,7 @@ pub async fn resolve_if_present<R: Runtime>(
         task_id,
         &png,
         cancel,
-        "OCR 多次未通过，请看图输入验证码字符",
+        "请看图输入当前验证码（若多次失败且账号密码不确定，请先到设置 → 网站账号核对）",
         Some(client),
     )
     .await?;
@@ -1414,12 +1784,17 @@ pub async fn resolve_if_present<R: Runtime>(
         .as_deref()
         .filter(|s| !s.is_empty() && *s != "input")
         .unwrap_or("input[placeholder*=\"验证码\"]");
-    fill_captcha(client, selector, &code).await?;
+    // Same refill→recheck as OCR path (HITL used to skip this and lose the code).
+    fill_captcha_then_refill_credentials(
+        client,
+        selector,
+        &code,
+        login_form,
+        retry_login,
+        &push_log,
+    )
+    .await?;
     push_log("已填入人工验证码".into());
-    if retry_login && login_form.has_credentials() {
-        refill_login_form(client, login_form).await?;
-        push_log("已重新填入账号与密码".into());
-    }
     if retry_login {
         tokio::time::sleep(Duration::from_millis(200)).await;
         if let Err(e) = click_login_button(client).await {
@@ -1827,6 +2202,7 @@ mod captcha_ocr_tests {
         s.absorb_input_step("密码demo");
         assert_eq!(s.phone.as_deref(), Some("demo"));
         assert_eq!(s.password.as_deref(), Some("demo"));
+        assert!(s.has_account() && s.has_password());
         let mut s2 = LoginFormSnapshot::default();
         s2.absorb_input_step("账号=demo");
         s2.absorb_input_step("密码=demo");
@@ -1835,10 +2211,59 @@ mod captcha_ocr_tests {
     }
 
     #[test]
+    fn account_only_is_not_full_password_snapshot() {
+        let mut s = LoginFormSnapshot::default();
+        s.absorb_input_step("手机号 / 账号=someone");
+        assert!(s.has_account());
+        assert!(!s.has_password());
+        assert!(s.has_credentials());
+    }
+
+    #[test]
     fn sanitize_captcha_ocr_text_keeps_alnum() {
         assert_eq!(sanitize_captcha_ocr_text("A B\n12").as_deref(), Some("AB12"));
         assert_eq!(sanitize_captcha_ocr_text("xy"), None);
         assert_eq!(sanitize_captcha_ocr_text("too-long-code-here"), None);
+    }
+
+    #[test]
+    fn sanitize_captcha_ocr_text_evaluates_arithmetic() {
+        assert_eq!(sanitize_captcha_ocr_text("3+5=?").as_deref(), Some("8"));
+        assert_eq!(sanitize_captcha_ocr_text("3 + 5 = ?").as_deref(), Some("8"));
+        assert_eq!(sanitize_captcha_ocr_text("12-4").as_deref(), Some("8"));
+        assert_eq!(sanitize_captcha_ocr_text("3x5=?").as_deref(), Some("15"));
+        assert_eq!(sanitize_captcha_ocr_text("3×5＝？").as_deref(), Some("15"));
+        assert_eq!(sanitize_captcha_ocr_text("８÷２=?").as_deref(), Some("4"));
+        assert_eq!(sanitize_captcha_ocr_text("8/3=?").as_deref(), None); // non-exact
+        assert_eq!(sanitize_captcha_ocr_text("3+5=8").as_deref(), Some("8")); // eval LHS
+        assert_eq!(sanitize_captcha_ocr_text("6*3=").as_deref(), Some("18"));
+        assert_eq!(sanitize_captcha_ocr_text("6 * 3 =").as_deref(), Some("18"));
+        assert_eq!(sanitize_captcha_ocr_text("2 * 01 =").as_deref(), Some("2"));
+        // Still prefer alnum when no operator
+        assert_eq!(sanitize_captcha_ocr_text("1234").as_deref(), Some("1234"));
+        assert_eq!(sanitize_captcha_ocr_text("K7M2").as_deref(), Some("K7M2"));
+    }
+
+    #[test]
+    fn sanitize_rejects_arithmetic_junk_and_fragments() {
+        // Fragment / mapped "*1" — not a clean binary expr
+        assert_eq!(sanitize_captcha_ocr_text("x1"), None);
+        // Chinese OCR garbage dominating (junk > expr chars)
+        assert_eq!(sanitize_captcha_ocr_text("徽淙考磋"), None);
+        assert_eq!(sanitize_captcha_ocr_text("徽淙考3*1磋啊"), None);
+        // Accidental digits buried in junk must not invent an answer
+        assert_eq!(sanitize_captcha_ocr_text("啊啊啊6*7啊啊啊啊"), None);
+        // Short label + clean expr still OK (junk 2 < expr 3)
+        assert_eq!(sanitize_captcha_ocr_text("结果3+5"), Some("8".into()));
+    }
+
+    #[test]
+    fn captcha_specialized_kill_switch_defaults_on() {
+        std::env::remove_var("WEBCLAW_CAPTCHA_SPECIALIZED");
+        assert!(super::captcha_specialized_enabled());
+        std::env::set_var("WEBCLAW_CAPTCHA_SPECIALIZED", "0");
+        assert!(!super::captcha_specialized_enabled());
+        std::env::remove_var("WEBCLAW_CAPTCHA_SPECIALIZED");
     }
 
     #[test]
@@ -1899,10 +2324,12 @@ mod captcha_ocr_tests {
         assert_eq!(
             CaptchaOcrOutcome::Ok {
                 code: "K7M2".into(),
-                score: 0.9
+                score: 0.9,
+                raw: "K7M2".into(),
+                engine: "CAPTCHA_OCR",
             }
             .code_tag(),
-            "OCR_OK"
+            "CAPTCHA_OCR"
         );
     }
 }

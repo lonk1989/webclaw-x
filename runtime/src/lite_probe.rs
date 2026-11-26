@@ -88,7 +88,7 @@ async fn ensure_shared_browser() -> Result<u16, String> {
         return Ok(port);
     }
     let (p, _reused, msg) =
-        chrome::ensure_worker_chrome(lite_headless(), false, "lite").await?;
+        chrome::ensure_worker_chrome(lite_headless(), false, "lite", None).await?;
     eprintln!("[probe] {msg}");
     Ok(p)
 }

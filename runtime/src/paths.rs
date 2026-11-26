@@ -38,6 +38,13 @@ pub fn classify_models_dir() -> PathBuf {
     dir
 }
 
+/// 验证码专用 OCR（ddddocr ONNX）缓存（机器级）
+pub fn captcha_models_dir() -> PathBuf {
+    let dir = app_root_dir().join("captcha-models");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 /// 微信 .dat 解密图片公共缓存（机器级）
 pub fn wechat_img_cache_dir() -> PathBuf {
     let dir = app_root_dir().join("wechat-img-cache");

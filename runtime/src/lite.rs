@@ -99,8 +99,8 @@ pub fn print_usage() {
   webclaw-lite scripts read-table --input <xlsx|xls> [--sheet 名|序号] [--header-row 0] [--limit 20] [--max-cols 40]
   webclaw-lite scripts ocr-image --input <png|jpg|…>
   webclaw-lite accounts list
-  webclaw-lite accounts ensure --id ehr|old-mes [--name 名称] --url URL
-  webclaw-lite accounts set --id ehr|old-mes [--name 名称] [--url URL] --user 账号 --password 密码
+  webclaw-lite accounts ensure --id my-app [--name 名称] --url URL
+  webclaw-lite accounts set --id my-app [--name 名称] [--url URL] --user 账号 --password 密码
 
 说明:
   由 AI 助手按 SKILL.md 调用本 CLI；禁止用 Playwright 等重写步骤。
@@ -384,6 +384,7 @@ fn lite_prewarm() -> Result<(), String> {
         headless,
         true,
         "prewarm",
+        None,
     ))?;
     println!(
         "{}",
@@ -1208,6 +1209,7 @@ fn lite_prewarm_value() -> Result<serde_json::Value, String> {
         headless,
         true,
         "prewarm",
+        None,
     ))?;
     Ok(json!({"port": port, "reused": reused, "message": msg}))
 }

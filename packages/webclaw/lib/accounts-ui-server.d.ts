@@ -14,6 +14,7 @@ export interface AccountsUiHandle {
     /** Forget in-memory focus (call with clearLiveFocus on Host dispose). */
     clearFocus: () => void;
 }
+export type LivePhase = 'idle' | 'running' | 'need_human' | 'cancelling' | 'cancelled' | 'done';
 export interface LiveTimelineFrame {
     id: number;
     file: string;

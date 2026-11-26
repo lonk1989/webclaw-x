@@ -18,14 +18,14 @@ def test_parse_v1_export():
             "schema": SCHEMA,
             "host": "workbuddy",
             "systems": [
-                {"id": "ehr", "name": "EHR", "url": "https://ehr.example/", "username": "u"},
+                {"id": "my-app", "name": "演示", "url": "https://app.example/", "username": "u"},
                 {"id": "bad", "name": "", "url": ""},
             ],
         }
     )
     rows = parse_export_document(raw)
     assert len(rows) == 1
-    assert rows[0]["id"] == "ehr"
+    assert rows[0]["id"] == "my-app"
     assert rows[0]["url"].startswith("https://")
 
 
@@ -36,9 +36,9 @@ def test_parse_fengxing_by_user_store():
             "byUser": {
                 "u1": [
                     {
-                        "id": "old-mes",
-                        "name": "旧MES系统",
-                        "url": "http://zhhw.example:18082/",
+                        "id": "prod",
+                        "name": "生产系统",
+                        "url": "http://prod.example:18082/",
                         "username": "a",
                         "password": "secret",
                     }
@@ -48,7 +48,7 @@ def test_parse_fengxing_by_user_store():
     )
     rows = parse_export_document(raw)
     assert len(rows) == 1
-    assert rows[0]["id"] == "old-mes"
+    assert rows[0]["id"] == "prod"
     assert rows[0]["password"] == "secret"
 
 
@@ -73,9 +73,9 @@ def test_probe_imports_url_without_lite(tmp_path: Path):
                 "host": "fengxing",
                 "systems": [
                     {
-                        "id": "oa",
-                        "name": "OA系统",
-                        "url": "http://oa.example/",
+                        "id": "office",
+                        "name": "办公系统",
+                        "url": "http://office.example/",
                         "username": "bob",
                     }
                 ],
@@ -93,5 +93,5 @@ def test_probe_imports_url_without_lite(tmp_path: Path):
     assert result.imported_files == 1
     assert result.ensured == 1
     vault = json.loads((tmp_path / "web-systems.json").read_text(encoding="utf-8"))
-    assert vault["systems"][0]["id"] == "oa"
-    assert vault["systems"][0]["url"] == "http://oa.example/"
+    assert vault["systems"][0]["id"] == "office"
+    assert vault["systems"][0]["url"] == "http://office.example/"

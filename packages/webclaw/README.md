@@ -6,7 +6,7 @@ Cordis plugin id: `webclaw` (fiber `id` in patch). npm package: **`@lonk1989/web
 
 ## What this is
 
-- Task tools: `webclaw_probe` / `webclaw_run` / `webclaw_inspect_params` / `webclaw_accounts_status` / `webclaw_freeze` / `webclaw_list_recipes` / `webclaw_import` / `webclaw_status` / `webclaw_human_reply` / `webclaw_cancel` / `webclaw_set_display`
+- Task tools: `webclaw_probe` / `webclaw_run` / `webclaw_inspect_params` / `webclaw_accounts_status` / `webclaw_freeze` / `webclaw_list_recipes` / `webclaw_import` / `webclaw_status` / `webclaw_human_reply` / `webclaw_cancel` / `webclaw_reset` / `webclaw_set_display` / `webclaw_browser`（status 含 busy/HITL/cancelMarker；卡死用 reset soft|hard）
 - Bundled Skill: **replay** (default) → **param form** when `参数…=` → **freeze** / **author** only for new sites
 - Local library: workspace `recipes/*.webclaw` (or `WEBCLAW_HOME/recipes`)
 - Preview/edit: DSH Files + sidebar plain text; **执行画面** right tab (`webclaw-live`) for headless step previews
@@ -38,9 +38,9 @@ pnpm add @lonk1989/webclaw
         # binaryPath: 'C:/path/to/webclaw-lite.exe'  # or '/path/to/webclaw-lite'
         # liteBaseUrl: 'https://cdn.example.com/webclaw/v0.1.8'  # tried first
         # systems:   # private DSH fork only — real login URLs, no passwords
-        #   - id: ehr
-        #     name: EHR系统
-        #     url: https://example.com/ehr-login
+        #   - id: my-app
+        #     name: 演示系统
+        #     url: https://example.com/login
 ```
 
 ### webclaw-lite binary (Windows / macOS)
@@ -88,18 +88,15 @@ DSH sends chat to the model over the network. **Do not put site passwords in rec
 
 ### Deploy overlay: seed login URLs (no passwords)
 
-Private DSH forks can prefill **id / name / URL** on boot (OSS catalog only has placeholder URLs):
+Private DSH forks can prefill **id / name / URL** on boot (OSS ships **no** built-in site catalog):
 
 ```yaml
 config:
   systems:
-    - id: ehr
-      name: EHR系统
+    - id: my-app
+      name: 演示系统
       # Prefer the real SSO entry (Feishu/Lark). Password not required.
       url: https://your-corp/login?sso=lark&next=%2F%23%23%2Findex
-    - id: old-mes
-      name: 旧MES系统
-      url: https://your-corp-mes-login/
 ```
 
 This runs `webclaw-lite accounts ensure` and never writes passwords. Keep real URLs in your private patch, not in public OSS. For Feishu SSO, URL alone is enough — do not ask users for passwords.
@@ -118,7 +115,28 @@ macOS:   ~/.webclaw/bin/webclaw-accounts
 
 Config knobs: `accountsUi` (default true), `accountsUiPort` (default 19229), `liveAutoOpen` (default false — set true to expand the right-rail live tab when a run starts).
 
-Recipes keep alias login only, e.g. `登录EHR系统`. Use the **SSO login URL** in the vault when the corp site supports Feishu/Lark SSO. Missing password does **not** block opening the site; the login step opens the URL, handles authorize when needed, and only asks for vault passwords on a classic username/password form. The agent must never invent `accounts set --password` or ask you to paste a password into chat.
+Recipes use vault-matched login only, e.g. `登录{保险箱站点名}` (exact name). Use the **SSO login URL** in the vault when the corp site supports Feishu/Lark SSO. Missing password does **not** block opening the site; the login step opens the URL, handles authorize when needed, and only asks for vault passwords on a classic username/password form. The agent must never invent `accounts set --password`, ask you to paste a password into chat, or invent built-in EHR/MES/OA aliases.
+
+## 资料库晋升（opt-in）
+
+Successful runs copy deliverables into the DSH workspace `outputs/webclaw-…/` and mark Fengxing’s artifact index.
+
+| Source | Promoted? |
+|--------|-----------|
+| `downloads/`, `files/` | Always (browser downloads & attachments) |
+| User「截图」, AI 分析 / 推送AI reports | Yes — via run_dir `library-manifest.jsonl` |
+| Collect table CSV / `.tables.json` with **rows > 0** | Yes — via manifest |
+| `页面采集-*.md`, failure screenshots, live-preview / executions | No (stay in run dir for preview/debug) |
+
+Optional defense in Fengxing `%APPDATA%/Fengxing/dsh-home/library.json` → `denyNamePatterns`:
+
+```json
+"denyNamePatterns": [
+  "failure",
+  "^页面采集",
+  "^live-"
+]
+```
 
 ## License
 

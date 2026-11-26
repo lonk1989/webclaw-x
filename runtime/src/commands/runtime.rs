@@ -688,6 +688,7 @@ async fn run_rhai_source<R: Runtime>(
 
 /// 关掉当前标签并在新标签打开（先开后关，避免 Chrome 在 0 标签时退出）。
 /// 「打开」「登录」用此路径杀掉旧站渲染进程，避免跨站 navigate 把旧页冻进 bfcache。
+/// 当前已是 about:blank / 新标签页时就地 navigate，避免再闪一张空白页。
 async fn recycle_current_tab(
     client: &mut CdpClient,
     url: Option<&str>,
@@ -699,13 +700,28 @@ async fn recycle_current_tab(
     }
     let port = client.port;
     let old_id = client.target_id.clone();
+    let old_url = client.target_url.clone();
+    let open_url = url.map(str::trim).filter(|u| !u.is_empty());
     let _ = client.unblock_debugger().await;
     let _ = chrome::close_devtools_page_targets_on(port).await;
 
+    // 冷启动 / 占位空白页：就地导航，不再 create blank → navigate。
+    if let Some(dest) = open_url {
+        if chrome::is_disposable_start_page(&old_url) {
+            client.navigate(dest).await?;
+            client.wait_after_navigation_cancel(30, cancel).await?;
+            let _ = client.sync_page_meta().await;
+            check_cancel(cancel)?;
+            client.prepare_tab_for_automation().await?;
+            return Ok(false);
+        }
+    }
+
     let target = crate::browser_network::with_manual_new_tab_unpaused(port, || async {
-        chrome::create_page_target_on(port, None).await
+        chrome::create_page_target_on(port, open_url).await
     })
     .await?;
+    let created_with_dest = open_url.is_some() && !chrome::is_disposable_start_page(&target.url);
     *client = CdpClient::connect_to_target_on(port, &target.id).await?;
     client.prepare_tab_for_automation().await?;
 
@@ -722,8 +738,11 @@ async fn recycle_current_tab(
     };
     let _ = client.activate_tab().await;
 
-    if let Some(url) = url.map(str::trim).filter(|u| !u.is_empty()) {
-        client.navigate(url).await?;
+    if let Some(dest) = open_url {
+        // createTarget 已带 URL 时只等加载；否则再 Page.navigate。
+        if !created_with_dest {
+            client.navigate(dest).await?;
+        }
         client.wait_after_navigation_cancel(30, cancel).await?;
         let _ = client.sync_page_meta().await;
     }
@@ -781,6 +800,15 @@ fn page_hint<'a>(nav_arg: &'a str, page_url: &'a str) -> &'a str {
     }
 }
 
+fn already_at_open_destination(current: &str, dest: &str) -> bool {
+    let a = current.trim().trim_end_matches('/');
+    let b = dest.trim().trim_end_matches('/');
+    if a.is_empty() || chrome::is_disposable_start_page(a) || b.is_empty() {
+        return false;
+    }
+    a.eq_ignore_ascii_case(b)
+}
+
 async fn run_open<R: Runtime>(
     client: &mut CdpClient,
     args: &str,
@@ -788,7 +816,16 @@ async fn run_open<R: Runtime>(
     ctx: Option<&CommandContext<'_, R>>,
 ) -> Result<String, String> {
     let url = normalize_url(args);
-    let closed_old = recycle_current_tab(client, Some(&url), cancel).await?;
+    // 冷启动已把该 URL 写进 Chrome 启动参数时，勿再换标签闪一下；仍等待加载就绪。
+    let closed_old = if already_at_open_destination(&client.target_url, &url) {
+        check_cancel(cancel)?;
+        client.prepare_tab_for_automation().await?;
+        let _ = client.wait_after_navigation_cancel(30, cancel).await;
+        let _ = client.sync_page_meta().await;
+        false
+    } else {
+        recycle_current_tab(client, Some(&url), cancel).await?
+    };
     maybe_wait_feishu_qr_login(ctx, client, cancel, &url).await?;
     if closed_old {
         Ok(format!("已打开 {url} | 已关闭旧标签"))
@@ -949,14 +986,23 @@ async fn run_new_tab<R: Runtime>(
     let port = client.port;
     let _ = client.unblock_debugger().await;
     let _ = chrome::close_devtools_page_targets_on(port).await;
+    let dest = if url.is_empty() {
+        None
+    } else {
+        Some(normalize_url(url))
+    };
     let target = crate::browser_network::with_manual_new_tab_unpaused(port, || async {
-        chrome::create_page_target_on(port, None).await
+        chrome::create_page_target_on(port, dest.as_deref()).await
     })
     .await?;
+    let created_with_dest =
+        dest.as_deref().is_some_and(|u| !chrome::is_disposable_start_page(&target.url) && !u.is_empty());
     *client = CdpClient::connect_to_target_on(port, &target.id).await?;
     client.prepare_tab_for_automation().await?;
-    if !url.is_empty() {
-        client.navigate(&normalize_url(url)).await?;
+    if let Some(ref dest) = dest {
+        if !created_with_dest {
+            client.navigate(dest).await?;
+        }
         client.wait_after_navigation_cancel(30, cancel).await?;
         let _ = client.sync_page_meta().await;
     }
@@ -1578,9 +1624,16 @@ async fn run_login<R: Runtime>(
     let system = crate::web_systems::find_web_system_by_query(args)?;
     let login_url = crate::web_systems::login_url_for(&system);
 
-    let closed_old = recycle_current_tab(client, Some(&login_url), cancel)
-        .await
-        .map_err(|e| format!("打开登录页失败: {e}"))?;
+    let closed_old = if already_at_open_destination(&client.target_url, &login_url) {
+        client.prepare_tab_for_automation().await?;
+        let _ = client.wait_after_navigation_cancel(30, cancel).await;
+        let _ = client.sync_page_meta().await;
+        false
+    } else {
+        recycle_current_tab(client, Some(&login_url), cancel)
+            .await
+            .map_err(|e| format!("打开登录页失败: {e}"))?
+    };
     check_cancel(cancel)?;
 
     let credentials = serde_json::json!({
@@ -1592,14 +1645,50 @@ async fn run_login<R: Runtime>(
         "password": system.password,
     });
 
-    let v = eval_user_script(
-        client,
-        &cmd.script,
-        args,
-        session,
-        Some(serde_json::json!({ "credentials": credentials })),
-    )
-    .await?;
+    // Unauthenticated sites often bounce 业务页 → /login (or SSO). That kills the
+    // in-flight Runtime.evaluate (CDP -32000 navigated/closed). Re-attach and
+    // re-run the login script — landing on the login form is the happy path.
+    const LOGIN_SCRIPT_NAV_RETRIES: u32 = 3;
+    let mut v = None;
+    let mut last_nav_err: Option<String> = None;
+    for attempt in 0..LOGIN_SCRIPT_NAV_RETRIES {
+        check_cancel(cancel)?;
+        match eval_user_script(
+            client,
+            &cmd.script,
+            args,
+            session,
+            Some(serde_json::json!({ "credentials": credentials })),
+        )
+        .await
+        {
+            Ok(val) => {
+                v = Some(val);
+                break;
+            }
+            Err(e) if CdpClient::is_session_lost_error(&e) => {
+                last_nav_err = Some(e);
+                let _ = client.ensure_attached().await;
+                let _ = client.wait_after_navigation_cancel(20, cancel).await;
+                let _ = client.sync_page_meta().await;
+                let _ = client.prepare_tab_for_automation().await;
+                if attempt + 1 < LOGIN_SCRIPT_NAV_RETRIES {
+                    // Brief settle; SPA auth redirects often finish after first paint.
+                    let _ = sleep_cancellable(Duration::from_millis(400), cancel).await;
+                    continue;
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    let v = v.ok_or_else(|| {
+        format!(
+            "登录过程中页面发生跳转（常见：未登录被重定向到登录页），已重试仍无法完成填表。{}",
+            last_nav_err
+                .map(|e| format!(" 末次: {e}"))
+                .unwrap_or_default()
+        )
+    })?;
 
     if v.get("ok").and_then(|x| x.as_bool()) != Some(true) {
         return Err(v
@@ -1888,11 +1977,13 @@ async fn run_screenshot(
     };
     let idx = step_index.unwrap_or(0);
     let art = session.save_step_screenshot(&png, idx, label)?;
+    let _ = session.mark_artifact_for_library(&art, "screenshot");
     Ok(format!("已截图 → {}", art.name))
 }
 
 
-/// 将采集包中的表格双写为 JSON + CSV（与 Markdown 同目录；无表则跳过）
+/// 将采集包中的表格双写为 JSON + CSV（与 Markdown 同目录；无表则跳过）。
+/// 有数据行的 CSV / tables.json 登记进资料库清单；页面采集 md 永不登记。
 fn save_collect_table_sidecars(
     session: &Arc<RunSession>,
     md_file_name: &str,
@@ -1906,11 +1997,15 @@ fn save_collect_table_sidecars(
         .strip_suffix(".md")
         .unwrap_or(md_file_name);
     let mut written = Vec::new();
+    let any_rows = tables.iter().any(|t| !t.rows.is_empty());
     let json = crate::page_collect::tables_to_json(tables)?;
     let json_name = format!("{stem}.tables.json");
-    session
+    let json_art = session
         .save_text_document(&json_name, &json, step_index)
         .map_err(|e| e.to_string())?;
+    if any_rows {
+        let _ = session.mark_artifact_for_library(&json_art, "collect-tables-json");
+    }
     written.push(json_name);
     for (i, table) in tables.iter().enumerate() {
         let csv_name = if tables.len() == 1 {
@@ -1919,9 +2014,12 @@ fn save_collect_table_sidecars(
             format!("{stem}.{}.csv", i + 1)
         };
         let csv = crate::page_collect::table_to_csv(table);
-        session
+        let csv_art = session
             .save_text_document(&csv_name, &csv, step_index)
             .map_err(|e| e.to_string())?;
+        if !table.rows.is_empty() {
+            let _ = session.mark_artifact_for_library(&csv_art, "collect-table-csv");
+        }
         written.push(csv_name);
     }
     Ok(written)
@@ -2060,6 +2158,7 @@ async fn run_ai_analyze<R: Runtime>(
     let art = session
         .save_text_document(&file_name, &report, step_index)
         .map_err(|e| e.to_string())?;
+    let _ = session.mark_artifact_for_library(&art, "ai-analyze");
 
     // 正文同步到客户端（不含报告标题 / 参考文件 / Token 统计）
     let answer = answer.trim();
@@ -2790,6 +2889,7 @@ async fn run_feishu_push<R: Runtime>(
             let art = session
                 .save_text_document(&file_name, &report, step_index)
                 .map_err(|e| e.to_string())?;
+            let _ = session.mark_artifact_for_library(&art, "ai-analyze-push");
 
             let answer = answer.trim();
             if answer.is_empty() {

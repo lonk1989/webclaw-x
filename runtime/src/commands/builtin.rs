@@ -99,7 +99,7 @@ pub fn default_commands() -> Vec<CommandDef> {
             kind: CommandKind::Script,
             runner: RunnerKind::RustLogin,
             builtin: true,
-            description: "关闭当前标签后按网站账号登录（释放旧页渲染进程）；已登录直达业务页时跳过填表与校验。失败则中断。如：登录EHR系统、登录oa".into(),
+            description: "关闭当前标签后按网站账号登录（释放旧页渲染进程）；已登录直达业务页时跳过填表与校验。失败则中断。站点名须与保险箱一致，如：登录演示系统".into(),
             script: scripts::LOGIN_SYSTEM.to_string(),
             macro_body: String::new(),
             updated_at: now,
@@ -183,7 +183,7 @@ pub fn default_commands() -> Vec<CommandDef> {
             kind: CommandKind::Script,
             runner: RunnerKind::JavaScript,
             builtin: true,
-            description: "采集当前页可见文字与表格（含同源 iframe 与跨域 iframe；飞书多维表格页写入「表格」）。无参数=全部；可写分类：采集表格、采集按钮、采集标题、采集链接、采集输入框、采集其它文字（可并列：采集表格、按钮）"
+            description: "采集当前页可见文字与表格（含同源 iframe 与跨域 iframe；飞书多维表格页写入「表格」）。无参数=全部；可写分类：采集表格、采集按钮、采集标题、采集链接、采集输入框、采集其它文字（可并列：采集表格、按钮）。「内容/页面主要内容」等模糊说法按全部处理，勿发明其它分类名"
                 .into(),
             script: "return { ok: true, delegate: 'rust_collect_page', message: '已采集' };".into(),
             macro_body: String::new(),

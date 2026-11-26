@@ -638,7 +638,7 @@ fn refresh_builtin_login_script(commands: &mut Vec<CommandDef>) -> bool {
             changed = true;
         }
         let want_desc =
-            "关闭当前标签后按网站账号登录（释放旧页渲染进程）；已登录直达业务页时跳过填表与校验。失败则中断。如：登录EHR系统、登录oa";
+            "关闭当前标签后按网站账号登录（释放旧页渲染进程）；已登录直达业务页时跳过填表与校验。失败则中断。站点名须与保险箱一致，如：登录演示系统";
         if cmd.description != want_desc {
             cmd.description = want_desc.into();
             changed = true;
@@ -827,7 +827,7 @@ fn refresh_builtin_collect_desc(commands: &mut Vec<CommandDef>) -> bool {
         .find(|c| c.id == "builtin_collect_page" && c.builtin)
     {
         let want =
-            "采集当前页可见文字与表格（含同源 iframe 与跨域 iframe；飞书多维表格页写入「表格」）。无参数=全部；可写分类：采集表格、采集按钮、采集标题、采集链接、采集输入框、采集其它文字（可并列：采集表格、按钮）";
+            "采集当前页可见文字与表格（含同源 iframe 与跨域 iframe；飞书多维表格页写入「表格」）。无参数=全部；可写分类：采集表格、采集按钮、采集标题、采集链接、采集输入框、采集其它文字（可并列：采集表格、按钮）。「内容/页面主要内容」等模糊说法按全部处理，勿发明其它分类名";
         if cmd.description != want {
             cmd.description = want.into();
             changed = true;

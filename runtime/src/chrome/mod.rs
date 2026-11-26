@@ -100,6 +100,7 @@ pub async fn ensure_worker_chrome(
     headless: bool,
     resume: bool,
     task_id: &str,
+    initial_url: Option<&str>,
 ) -> Result<(u16, bool, String), String> {
     let port = worker_cdp_port();
     let profile = ChromeInstance::profile_for_task(task_id);
@@ -135,19 +136,32 @@ pub async fn ensure_worker_chrome(
     }
     // Fresh launch already uses the requested mode; drop a stale mode-change flag.
     let _ = crate::display::take_mode_change_recycle();
-    let _child = launch_debug_chrome_on(&profile, port, headless)?;
+    let start_url = sanitize_chrome_start_url(initial_url);
+    let _child = launch_debug_chrome_on(&profile, port, headless, start_url)?;
     wait_for_debug_port_on(port, 25).await?;
     let pages = list_page_targets_on(port).await.unwrap_or_default();
     if pages.is_empty() {
-        create_page_target_on(port, Some("about:blank")).await?;
+        // 启动参数已带业务 URL 时仍无 page：补一张（尽量仍用该 URL）
+        create_page_target_on(port, start_url.or(Some("about:blank"))).await?;
     }
     let msg = if chrome_recycle_requested() {
         let kind = if resume { "继续任务" } else { "新任务" };
-        format!("{kind}：已强制回收并重启浏览器 | 端口 {port}")
+        match start_url {
+            Some(u) => format!("{kind}：已强制回收并重启浏览器 | 端口 {port} | {u}"),
+            None => format!("{kind}：已强制回收并重启浏览器 | 端口 {port}"),
+        }
     } else if resume {
-        format!("继续任务：浏览器已不在，已按本任务目录重新打开 | 端口 {port}")
+        match start_url {
+            Some(u) => {
+                format!("继续任务：浏览器已不在，已按本任务目录重新打开 | 端口 {port} | {u}")
+            }
+            None => format!("继续任务：浏览器已不在，已按本任务目录重新打开 | 端口 {port}"),
+        }
     } else {
-        format!("新任务：已启动浏览器 | 端口 {port}")
+        match start_url {
+            Some(u) => format!("新任务：已启动浏览器 | 端口 {port} | {u}"),
+            None => format!("新任务：已启动浏览器 | 端口 {port}"),
+        }
     };
     Ok((port, false, msg))
 }
@@ -202,7 +216,7 @@ pub async fn restart_worker_chrome(headless: bool, task_id: &str) -> Result<(u16
         tokio::time::sleep(Duration::from_millis(400)).await;
     }
     let profile = ChromeInstance::profile_for_task(task_id);
-    let _child = launch_debug_chrome_on(&profile, port, headless)?;
+    let _child = launch_debug_chrome_on(&profile, port, headless, None)?;
     wait_for_debug_port_on(port, 25).await?;
     let pages = list_page_targets_on(port).await.unwrap_or_default();
     if pages.is_empty() {
@@ -565,8 +579,27 @@ fn want_container_chrome_flags() -> bool {
             .unwrap_or(false)
 }
 
+/// 仅 http(s) 业务地址可作为 Chrome 启动页；其余回退 about:blank。
+pub(crate) fn sanitize_chrome_start_url(url: Option<&str>) -> Option<&str> {
+    let u = url.map(str::trim).filter(|u| !u.is_empty())?;
+    if is_disposable_start_page(u) {
+        return None;
+    }
+    let lower = u.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        Some(u)
+    } else {
+        None
+    }
+}
+
 /// Debug Chrome 启动参数（单元测试可校验关键 flag）。
-pub(crate) fn debug_chrome_launch_args(profile: &Path, port: u16, headless: bool) -> Vec<String> {
+pub(crate) fn debug_chrome_launch_args(
+    profile: &Path,
+    port: u16,
+    headless: bool,
+    initial_url: Option<&str>,
+) -> Vec<String> {
     let mut args = vec![
         format!("--remote-debugging-port={port}"),
         "--remote-allow-origins=*".to_string(),
@@ -608,7 +641,12 @@ pub(crate) fn debug_chrome_launch_args(profile: &Path, port: u16, headless: bool
         args.push("--window-size=1280,900".to_string());
         args.push("--force-device-scale-factor=1".to_string());
     }
-    args.push("about:blank".to_string());
+    // 冷启动直接打开首个「打开/登录」目标，避免先闪 about:blank。
+    args.push(
+        sanitize_chrome_start_url(initial_url)
+            .unwrap_or("about:blank")
+            .to_string(),
+    );
     args
 }
 
@@ -616,13 +654,14 @@ pub(crate) fn launch_debug_chrome_on(
     profile: &Path,
     port: u16,
     headless: bool,
+    initial_url: Option<&str>,
 ) -> Result<Child, String> {
     let exe = resolve_chrome_executable()?;
     std::fs::create_dir_all(profile).map_err(|e| e.to_string())?;
     seed_automation_profile_prefs(profile)?;
 
     let mut cmd = Command::new(&exe);
-    for arg in debug_chrome_launch_args(profile, port, headless) {
+    for arg in debug_chrome_launch_args(profile, port, headless, initial_url) {
         cmd.arg(arg);
     }
     // 独立进程组：宿主机短命退出时不要把浏览器一起带走（续跑要接同一 CDP）
@@ -714,8 +753,8 @@ pub(crate) fn seed_automation_profile_prefs(profile: &Path) -> Result<(), String
     Ok(())
 }
 
-pub fn launch_debug_chrome(headless: bool) -> Result<Child, String> {
-    launch_debug_chrome_on(&debug_user_data_dir(), DEBUG_PORT, headless)
+pub fn launch_debug_chrome(headless: bool, initial_url: Option<&str>) -> Result<Child, String> {
+    launch_debug_chrome_on(&debug_user_data_dir(), DEBUG_PORT, headless, initial_url)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1105,9 +1144,66 @@ pub async fn close_page_target_on(port: u16, target_id: &str) -> Result<(), Stri
     Ok(())
 }
 
-pub async fn create_page_target_on(port: u16, url: Option<&str>) -> Result<TargetInfo, String> {
+/// 启动页 / 新标签占位：可就地 navigate，不必再开一张空白页。
+pub fn is_disposable_start_page(url: &str) -> bool {
+    let u = url.trim();
+    u.is_empty()
+        || u == "about:blank"
+        || u.starts_with("chrome://newtab")
+        || u.starts_with("chrome://new-tab-page")
+        || u.starts_with("chrome://blank")
+}
+
+/// 经 Browser CDP `Target.createTarget` 直接以目标 URL 建页（避免先闪 about:blank）。
+async fn create_target_id_via_cdp(port: u16, url: &str) -> Result<String, String> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+    let ws_url = browser_ws_url_on(port).await?;
+    let (ws, _) = connect_async(&ws_url)
+        .await
+        .map_err(|e| format!("Browser CDP 连接失败: {e}"))?;
+    let (mut sink, mut stream) = ws.split();
+    let req_id = 1u64;
+    let req = json!({
+        "id": req_id,
+        "method": "Target.createTarget",
+        "params": { "url": url }
+    });
+    sink
+        .send(Message::Text(req.to_string()))
+        .await
+        .map_err(|e| format!("Target.createTarget 发送失败: {e}"))?;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        let msg = tokio::time::timeout_at(deadline, stream.next())
+            .await
+            .map_err(|_| "Target.createTarget 超时".to_string())?
+            .ok_or_else(|| "Browser CDP 在 createTarget 前关闭".to_string())?
+            .map_err(|e| format!("Browser CDP 读失败: {e}"))?;
+        let Message::Text(text) = msg else {
+            continue;
+        };
+        let v: Value = serde_json::from_str(&text)
+            .map_err(|e| format!("解析 createTarget 响应失败: {e}"))?;
+        if v.get("id").and_then(|x| x.as_u64()) != Some(req_id) {
+            continue;
+        }
+        if let Some(err) = v.get("error") {
+            return Err(format!("Target.createTarget 失败: {err}"));
+        }
+        let tid = v
+            .pointer("/result/targetId")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| "Target.createTarget 未返回 targetId".to_string())?;
+        return Ok(tid.to_string());
+    }
+    Err("Target.createTarget 超时".into())
+}
+
+async fn create_blank_page_via_json_new(port: u16) -> Result<TargetInfo, String> {
     let base = debug_base_url_on(port);
-    // 仅创建空白标签；带 URL 的导航由调用方通过 CDP Page.navigate 完成（避免 /json/new?url 编码问题）
     let endpoint = format!("{base}/json/new");
     let client = reqwest::Client::new();
     let resp = match client.put(&endpoint).send().await {
@@ -1119,14 +1215,50 @@ pub async fn create_page_target_on(port: u16, url: Option<&str>) -> Result<Targe
     if !resp.status().is_success() {
         return Err(format!("创建标签页 HTTP {}", resp.status()));
     }
-    let target: TargetInfo = resp
-        .json()
+    resp.json()
         .await
-        .map_err(|e| format!("解析新标签页信息失败: {e}"))?;
+        .map_err(|e| format!("解析新标签页信息失败: {e}"))
+}
 
-    // 兼容旧调用：若传入 URL 且 create 后 target 仍空白，由上层 attach 后 navigate
-    let _ = url;
-    Ok(target)
+async fn lookup_page_target(port: u16, target_id: &str) -> Option<TargetInfo> {
+    for _ in 0..20 {
+        if let Ok(pages) = list_page_targets_on(port).await {
+            if let Some(t) = pages.into_iter().find(|t| t.id == target_id) {
+                return Some(t);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    None
+}
+
+pub async fn create_page_target_on(port: u16, url: Option<&str>) -> Result<TargetInfo, String> {
+    let open_url = url
+        .map(str::trim)
+        .filter(|u| !u.is_empty() && !is_disposable_start_page(u));
+
+    if let Some(u) = open_url {
+        // 优先 CDP：新标签直接加载目标，跳过空白页闪一下再 navigate。
+        match create_target_id_via_cdp(port, u).await {
+            Ok(tid) => {
+                if let Some(t) = lookup_page_target(port, &tid).await {
+                    return Ok(t);
+                }
+                return Ok(TargetInfo {
+                    id: tid,
+                    kind: "page".into(),
+                    title: String::new(),
+                    url: u.to_string(),
+                    parent_id: None,
+                });
+            }
+            Err(_) => {
+                // 回退空白 /json/new；调用方 attach 后 Page.navigate
+            }
+        }
+    }
+
+    create_blank_page_via_json_new(port).await
 }
 
 pub async fn create_page_target(url: Option<&str>) -> Result<TargetInfo, String> {
@@ -1680,11 +1812,12 @@ pub(crate) fn yield_focus_to_webclaw() {}
 async fn spawn_debug_chrome_and_wait(
     chrome_child: &parking_lot::Mutex<Option<Child>>,
     headless: bool,
+    initial_url: Option<&str>,
 ) -> Result<(), String> {
     // 旧进程/端口上的 Browser WS 已失效，避免复用后报 closed connection
     crate::browser_network::drop_port_capture(DEBUG_PORT);
     kill_and_clear_child(&mut *chrome_child.lock());
-    let child = launch_debug_chrome(headless)?;
+    let child = launch_debug_chrome(headless, initial_url)?;
     *chrome_child.lock() = Some(child);
     wait_for_debug_port(20).await?;
     if !headless {
@@ -1698,6 +1831,7 @@ async fn spawn_debug_chrome_and_wait(
 pub async fn ensure_debug_chrome_ready(
     chrome_child: &parking_lot::Mutex<Option<Child>>,
     headless: bool,
+    initial_url: Option<&str>,
 ) -> Result<String, String> {
     {
         let mut guard = chrome_child.lock();
@@ -1711,16 +1845,17 @@ pub async fn ensure_debug_chrome_ready(
         return Ok(format!("调试端口已就绪（{n} 个标签页）"));
     }
 
+    let start_url = sanitize_chrome_start_url(initial_url);
     let has_live_child = chrome_child.lock().is_some();
     if !has_live_child {
-        spawn_debug_chrome_and_wait(chrome_child, headless).await?;
+        spawn_debug_chrome_and_wait(chrome_child, headless, start_url).await?;
     } else if !(wait_for_debug_port(8).await.is_ok() && is_debug_port_ready().await) {
-        spawn_debug_chrome_and_wait(chrome_child, headless).await?;
+        spawn_debug_chrome_and_wait(chrome_child, headless, start_url).await?;
     }
 
     let pages = list_page_targets().await.unwrap_or_default();
     if pages.is_empty() {
-        create_page_target(Some("about:blank")).await?;
+        create_page_target(start_url.or(Some("about:blank"))).await?;
     }
     let _ = close_devtools_page_targets().await;
     let n = list_page_targets().await.map(|p| p.len()).unwrap_or(1);
@@ -1752,7 +1887,7 @@ pub async fn force_restart_debug_chrome(
     // 再扫一轮，清掉孤儿监听
     kill_listeners_on_port(DEBUG_PORT);
     tokio::time::sleep(Duration::from_millis(200)).await;
-    spawn_debug_chrome_and_wait(chrome_child, headless).await?;
+    spawn_debug_chrome_and_wait(chrome_child, headless, None).await?;
     let pages = list_page_targets().await.unwrap_or_default();
     if pages.is_empty() {
         create_page_target(Some("about:blank")).await?;
@@ -1802,7 +1937,7 @@ mod tests {
     #[test]
     fn debug_chrome_launch_args_include_popup_blocking() {
         let dir = std::env::temp_dir().join("webclaw-launch-args-test");
-        let args = debug_chrome_launch_args(&dir, 9222, false);
+        let args = debug_chrome_launch_args(&dir, 9222, false, None);
         assert!(args.iter().any(|a| a == "--disable-popup-blocking"));
         assert!(args
             .iter()
@@ -1821,16 +1956,36 @@ mod tests {
             .any(|a| a.starts_with("--unsafely-treat-insecure-origin-as-secure=")));
         assert!(!args.iter().any(|a| a == "--headless=new"));
         assert!(!args.iter().any(|a| a.starts_with("--window-size=")));
+        assert_eq!(args.last().map(String::as_str), Some("about:blank"));
     }
 
     #[test]
     fn debug_chrome_launch_args_headless_has_window_size() {
         let dir = std::env::temp_dir().join("webclaw-launch-args-headless-test");
-        let args = debug_chrome_launch_args(&dir, 9233, true);
+        let args = debug_chrome_launch_args(&dir, 9233, true, None);
         assert!(args.iter().any(|a| a == "--headless=new"));
         assert!(args.iter().any(|a| a == "--window-size=1280,900"));
         assert!(args.iter().any(|a| a == "--force-device-scale-factor=1"));
         assert!(args.iter().any(|a| a == "--site-per-process"));
+    }
+
+    #[test]
+    fn debug_chrome_launch_args_uses_initial_http_url() {
+        let dir = std::env::temp_dir().join("webclaw-launch-args-url-test");
+        let args = debug_chrome_launch_args(
+            &dir,
+            9222,
+            false,
+            Some("https://example.com/app?x=1"),
+        );
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("https://example.com/app?x=1")
+        );
+        let blank = debug_chrome_launch_args(&dir, 9222, false, Some("about:blank"));
+        assert_eq!(blank.last().map(String::as_str), Some("about:blank"));
+        let bad = debug_chrome_launch_args(&dir, 9222, false, Some("javascript:alert(1)"));
+        assert_eq!(bad.last().map(String::as_str), Some("about:blank"));
     }
 
     #[test]
@@ -1840,6 +1995,16 @@ mod tests {
         ));
         assert!(is_devtools_page_url("chrome://devtools/"));
         assert!(!is_devtools_page_url("https://example.com"));
+    }
+
+    #[test]
+    fn disposable_start_page_detects_blank_and_newtab() {
+        assert!(is_disposable_start_page(""));
+        assert!(is_disposable_start_page("about:blank"));
+        assert!(is_disposable_start_page("chrome://newtab/"));
+        assert!(is_disposable_start_page("chrome://new-tab-page/"));
+        assert!(!is_disposable_start_page("https://example.com"));
+        assert!(!is_disposable_start_page("http://127.0.0.1:8765/table.html"));
     }
 
     #[test]

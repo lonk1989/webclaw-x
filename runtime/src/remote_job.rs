@@ -867,11 +867,11 @@ mod tests {
             job_id: "abc".into(),
             title: "考勤".into(),
             created_at: "t".into(),
-            recipe: "登录EHR系统，等待2".into(),
+            recipe: "登录演示系统，等待2".into(),
             params: HashMap::new(),
             accounts: vec![JobAccount {
-                id: "ehr".into(),
-                name: "EHR系统".into(),
+                id: "demo".into(),
+                name: "演示系统".into(),
                 kind: WebSystemKind::Internal,
                 url: "https://example.com/".into(),
                 username: "u1".into(),
@@ -945,7 +945,7 @@ mod tests {
     fn executable_steps_strip_static_params() {
         let _ = crate::commands::list_commands();
         let (steps, params) = executable_remote_steps(
-            "参数公司=山西阳泉，参数月份=2026-07，登录EHR系统，点击时间管理",
+            "参数公司=山西阳泉，参数月份=2026-07，登录演示系统，点击时间管理",
             &HashMap::new(),
         )
         .unwrap();
@@ -963,7 +963,7 @@ mod tests {
             Some((34, 34, Some(true)))
         );
         assert_eq!(
-            parse_step_progress_line("── 步骤 1/34 ── 登录 EHR系统"),
+            parse_step_progress_line("── 步骤 1/34 ── 登录 演示系统"),
             Some((1, 34, None))
         );
         assert_eq!(

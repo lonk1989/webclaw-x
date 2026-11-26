@@ -10,6 +10,7 @@ eval/out/
 
 # --- DSH plugin (packages/webclaw) ---
 /packages/webclaw/node_modules/
+/packages/webclaw/.tmp-test/
 /packages/**/node_modules/
 
 # --- Rust / Cargo (monorepo runtime) ---

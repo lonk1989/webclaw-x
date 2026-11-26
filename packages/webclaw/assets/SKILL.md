@@ -17,7 +17,7 @@ Deterministic browser RPA driven by **Chinese natural-language recipes** stored 
 
 | User input | What you MUST do | Forbidden |
 |------------|------------------|-----------|
-| Says **打开 / 点击 / 采集 / 登录…** (even short:「打开MES」) | `webclaw_run` with a recipe that **keeps those verbs** (e.g. `打开旧MES系统`) | Stop after accounts lookup; `Start-Process` / default browser / `open` / `xdg-open` the vault URL |
+| Says **打开 / 点击 / 采集 / 登录…** | `webclaw_run` with a recipe that **keeps those verbs** (URL or **exact vault site name**; no built-in EHR/MES/OA aliases) | Stop after accounts lookup; invent site aliases; `Start-Process` / default browser / `open` / `xdg-open` the vault URL |
 | Pastes / attaches a **complete** recipe (many `，` steps, or `.webclaw`) | `webclaw_run` with the **entire** body / `recipePath` **once** | Split into steps; `webclaw_probe` between steps; a string of「测试：」mini-runs |
 | Mid-run step fails (browser still open) | Cheap clear fix only (e.g. `#N`, missing 确定) → **one** short patch. **Immediate ask** (no more patches) on: control not found timeout, download wait with pending=0, same click useless, patch still fails. Agent download waits: `等待下载30`/`60` — never default `等待下载200` | Long `等待下载200` then guess again; re-probe from 登录;「测试：」mini-runs; PowerShell/raw CDP |
 | Run / patch **succeeds** | Show **one complete updated recipe**. Any `save_skill` (update/copy) requires **explicit user consent** first — never silent/default persist. Own skill → ask then update; third-party → ask then `asCopy`; ad-hoc → paste code block unless user asks to save | Deliver patch-only; silent `save_skill`; overwrite upstream skill |
@@ -30,7 +30,7 @@ Deterministic browser RPA driven by **Chinese natural-language recipes** stored 
 | 新的 / 未知 Excel 文件 | `webclaw_read_table(path)` 先看表头+样例行 | pip/xlrd/openpyxl/pandas 作为第一眼 |
 | Excel / 合并表格 / 考勤汇总 / 本地文件脚本 | `webclaw_script_list` → `webclaw_script_run(name, args)`；跨 run 产物用 `fromRunDir` / `inputPaths` | Python first; shell `Copy-Item` 跨 `%LOCALAPPDATA%/webclaw/runs`；找「另一个任务」目录手工并入 |
 | New unknown site, **no** complete recipe | Authoring: `webclaw_probe` ↔ short `webclaw_run` | Invent labels; Playwright |
-| Login / EHR / 飞书 SSO | `登录EHR系统` via `webclaw_run`. Vault needs **correct SSO URL** only (`…/login?sso=lark&…`). No password. | Ask password; paste `webclaw-lite.exe accounts set`; block because `has_password=false`; invent password form |
+| Login / 飞书 SSO | `登录{保险箱站点名}` via `webclaw_run`. Vault needs **correct SSO URL** only (`…/login?sso=lark&…`). No password. | Ask password; paste `webclaw-lite.exe accounts set`; block because `has_password=false`; invent password form; invent built-in site names |
 
 **Rule of thumb:** Browser verbs → `webclaw_run`. Local Rhai library → `webclaw_script_*`. Accounts tools are lookup-only. **One frozen recipe, one `webclaw_run`**. Failure budget = **one** patch (or one fix→freeze→rerun); then **stop and ask the user**. Eyes = `webclaw_probe` / `采集` only — never PowerShell, raw CDP WebSocket, or DIY DOM scripts.
 
@@ -45,9 +45,9 @@ Deterministic browser RPA driven by **Chinese natural-language recipes** stored 
 
 ## Rules
 
-1. Prefer Host tools: `webclaw_status`, `webclaw_vision_status`, `webclaw_ocr_image`, `webclaw_accounts_status`, `webclaw_inspect_params`, `webclaw_probe`, `webclaw_run`, `webclaw_read_table`, `webclaw_script_list`, `webclaw_script_run`, `webclaw_freeze`, `webclaw_list_recipes`, `webclaw_import`, `webclaw_human_reply`, `webclaw_cancel`, `webclaw_set_display`, `webclaw_browser`
+1. Prefer Host tools: `webclaw_status`, `webclaw_vision_status`, `webclaw_ocr_image`, `webclaw_accounts_status`, `webclaw_inspect_params`, `webclaw_probe`, `webclaw_run`, `webclaw_read_table`, `webclaw_script_list`, `webclaw_script_run`, `webclaw_freeze`, `webclaw_list_recipes`, `webclaw_import`, `webclaw_human_reply`, `webclaw_cancel`, `webclaw_reset`, `webclaw_set_display`, `webclaw_browser`
 2. **Forbidden**: Playwright / Puppeteer / CSS / invented verbs; raw CDP / WebSocket scripts to port 19222; PowerShell/JS “DOM mine” helpers; coordinate clicks outside recipe verbs; `Start-Process` / default browser / `open` / `xdg-open`; PowerShell / `taskkill` / `Stop-Process` / `kill` to manage Chrome; **shell copy/move under `%LOCALAPPDATA%/webclaw/runs` or `~/.webclaw/runs`** (triggers danger-full-access; never “borrow” another task’s downloads)
-3. Chat attachments are one-shot. Durable library: `webclaw_import` / `webclaw_freeze`. Successful `webclaw_run` / `webclaw_script_run` also promotes important files (`downloads/` `documents/` `files/` / recipe screenshots) into workspace `outputs/webclaw-…/` for 资料库 — not live-preview / executions process junk.
+3. Chat attachments are one-shot. Durable library: `webclaw_import` / `webclaw_freeze`. Successful `webclaw_run` / `webclaw_script_run` **opt-in promotes** to workspace `outputs/webclaw-…/` for 资料库: always `downloads/` + `files/`; plus paths in run_dir `library-manifest.jsonl` (user「截图」、AI 分析报告、有数据行的采集 CSV/JSON). Not promoted: `documents/`/`screenshots/` blind scan, `页面采集-*.md`, failure dumps, live-preview / executions. Defense: Fengxing `library.json` `denyNamePatterns` may include `failure`, `^页面采集`, `^live-`.
 3b. **Excel**: Unknown file → `webclaw_read_table(path)` (embedded calamine; **never** pip xlrd/openpyxl for a first look). Known job → `webclaw_script_list` → `webclaw_script_run`.
 3c. **Cross-run files (download then script)**: Prefer one recipe that downloads then runs the script in the **same** `run_dir`. If already split: `webclaw_script_run(..., fromRunDir=<prior run_dir>)` or `inputPaths` to the xls/xlsx — **never** PowerShell/`Copy-Item`/`cp` between `webclaw/runs/.../downloads`. Do not dig other tasks’ AppData run folders.
 3c2. **Scripts**: Only `webclaw_script_run` names from `webclaw_script_list`. Never run「测试脚本」/markdown/JS probes — those are not Rhai and yield `Syntax error: Unexpected '用'`. For 考勤合并 use exact name `合并考勤数据`.
@@ -60,12 +60,13 @@ Deterministic browser RPA driven by **Chinese natural-language recipes** stored 
 8. **Recipe newlines**: Keep `登录…` as its own step; do not glue param values onto the next verb.
 9. **Display (sticky)**: Default is **headless**. User「接管 / 我来点 / 弹出浏览器 / 改成有头」→ immediately `webclaw_set_display(headless=false)` (Host restarts Chrome so a **real window** appears) and **keep headed** until the user explicitly says「隐藏浏览器 / 改成无头」→ `webclaw_set_display(headless=true)`. Do **not** auto-revert after a run. Do **not** pass `headless` on later `webclaw_run` calls (that would one-shot override). Mode switch recycles Chrome (page may reset; cookies usually kept). Watch progress in the right sidebar **执行画面** while headless.
 10. **Browser process**: Headless Chrome **stays up** after runs (reuse). User「关掉浏览器/关掉实例/释放浏览器」→ `webclaw_browser(action=stop)` only. `status` / `restart` also via this tool. Never shell-kill Chrome.
+11. **Self-heal (before a new run / when stuck)**: `webclaw_status` → check `busy` / `waitingHuman` / `cancelMarkerPresent` / `orphanRisk`. New task while still busy/HITL → `webclaw_cancel` first; still dirty → `webclaw_reset(soft)` then `hard` if needed. Abandoned captcha → cancel/reset; **do not** open a fresh chat and hard-start `webclaw_run` (cross-session `human_reply` is not supported). Tool results may include `phase` / `userMessage` / `preview` — relay those to the user (right-rail **执行画面** or preview paths); never empty「请看浏览器」while headless.
 
 ## Site accounts (local vault)
 
 | Do | Don't |
 |----|--------|
-| `登录EHR系统` with vault URL = SSO entry e.g. `https://…/login?sso=lark&next=…` | Ask for EHR password; CLI `accounts set --password` |
+| `登录{保险箱站点名}` with vault URL = SSO entry e.g. `https://…/login?sso=lark&next=…` | Ask for password; CLI `accounts set --password` |
 | `webclaw_run` when `has_password=false` if URL is set / SSO | Refuse to open for missing password |
 | If URL wrong: tell user to fix **设置 → 网站账号** (URL field only) | Probe about:blank; invent Playwright login |
 
@@ -95,14 +96,14 @@ Deterministic browser RPA driven by **Chinese natural-language recipes** stored 
 |------|---------|
 | `参数公司=科技事业部` | Form field default/placeholder; body `{{公司}}` |
 | `(点击取消?)` / `（点击已有？点击新建）` | **Probe**: try before `?`/`？`; on miss run after `?` or skip if empty; continue recipe |
-| `登录EHR系统` | Open vault URL (SSO OK, no password in recipe) |
+| `登录{保险箱站点名}` | Open vault URL (SSO OK, no password in recipe; name must match vault) |
 | `打开https://…` | Navigate |
 | `等待2` / `等待5` | **Agent must only use second sleeps** after open/login/click/save |
 | `点击…` / `输入…=` | UI actions |
 
 ### `等待` rules for Agent-authored recipes
 
-- **Only write duration waits**: `等待2`、`等待5`（optionally `等待3秒`）. Examples: `登录旧MES系统，等待5` · `点击保存，等待2`.
+- **Only write duration waits**: `等待2`、`等待5`（optionally `等待3秒`）. Examples: `打开https://a.com，等待5` · `点击保存，等待2`.
 - **Downloads**: write `等待下载30` or `等待下载60`. **Do not** default to `等待下载200` — that delays failure/help by minutes. Human frozen recipes with longer timeouts may replay as-is.
 - **Do not** write wait targets: `等待文字…`、`等待加载`、`等待遮罩`、`等待首页`、`等待登录成功`、`等待首页加载完成`、or any other status/NL phrase.
 - Why: Agent-invented wait targets rarely match real on-page text and time out; fixed seconds are predictable.
@@ -110,4 +111,4 @@ Deterministic browser RPA driven by **Chinese natural-language recipes** stored 
 
 ## HITL
 
-On `need_human`: captcha → `webclaw_human_reply` with `mode=text|ok|cancel`.
+On `need_human`: captcha → `webclaw_human_reply` with `mode=text|ok|cancel`. Show the captcha from the right-rail **执行画面** or `preview` / `image_path`. If the user abandons the captcha or a ghost cancel blocks the next task: `webclaw_cancel` → `webclaw_status` → `webclaw_reset(soft|hard)`.

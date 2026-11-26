@@ -303,6 +303,17 @@ def _legacy_error(stdout: str, stderr: str, done: dict | None) -> str | None:
     return None
 
 
+def _attach_phase_preview(result: dict, *, phase: str, user_message: str, run_dir: str | None = None) -> dict:
+    """WYSIWYG hints for WorkBuddy/Cursor (no live rail)."""
+    preview = status_fast._preview_paths(HOME, run_dir)
+    result["phase"] = phase
+    result["userMessage"] = user_message
+    if preview:
+        result["preview"] = preview
+        result.setdefault("data", {})["preview"] = preview
+    return result
+
+
 def _finalize(raw: dict, *, dualwrite: bool = False, structured_data: dict | None = None) -> dict:
     data = raw.get("data") or {}
     stdout = data.get("stdout") or ""
@@ -326,6 +337,13 @@ def _finalize(raw: dict, *, dualwrite: bool = False, structured_data: dict | Non
         if done.get("need_human"):
             out.update(ok=False, code=ErrorCode.NEED_HUMAN.value,
                        message="需要人工操作，请收到用户回复后调用 webclaw_human_reply")
+            rd = str(done.get("run_dir") or raw.get("run_dir") or "")
+            _attach_phase_preview(
+                out,
+                phase="need_human",
+                user_message="等待人工确认/验证码：请看右侧「执行画面」或 preview 中的图片路径，回复后调用 webclaw_human_reply",
+                run_dir=rd or None,
+            )
         else:
             # Never turn a nonzero process exit into success because of a stale done.
             out["ok"] = bool(raw.get("ok")) and bool(done.get("success"))
@@ -373,13 +391,47 @@ def _finalize(raw: dict, *, dualwrite: bool = False, structured_data: dict | Non
         out["run_dir"] = raw.get("run_dir")
     if raw.get("waiting"):
         out["need_human"] = raw["waiting"]
+        if out.get("code") == ErrorCode.NEED_HUMAN.value and "phase" not in out:
+            waiting = raw["waiting"] if isinstance(raw["waiting"], dict) else {}
+            rd = str(raw.get("run_dir") or waiting.get("run_dir") or "")
+            _attach_phase_preview(
+                out,
+                phase="need_human",
+                user_message="等待人工确认/验证码：请看右侧「执行画面」或 preview 路径，同会话调用 webclaw_human_reply",
+                run_dir=rd or None,
+            )
     # A prior NEED_HUMAN/done event must not hide a killed/expired child.
     if raw.get("code") == ErrorCode.TIMEOUT.value:
         out.update(ok=False, code=ErrorCode.TIMEOUT.value,
                    message=raw.get("message") or "运行超时，子进程已停止")
+        _attach_phase_preview(
+            out,
+            phase="cancelled",
+            user_message="运行超时已停止；可用 webclaw_status 检查，必要时 webclaw_reset",
+            run_dir=str(raw.get("run_dir") or "") or None,
+        )
     if raw.get("code") == ErrorCode.RUN_CANCELLED.value:
         out.update(ok=bool(raw.get("ok")), code=ErrorCode.RUN_CANCELLED.value,
                    message=raw.get("message") or "运行已取消，子进程已停止")
+        _attach_phase_preview(
+            out,
+            phase="cancelled",
+            user_message="任务已取消（Host 停止或 webclaw_cancel）；侧栏保留最后一帧。要开新任务请先 webclaw_status",
+            run_dir=str(raw.get("run_dir") or "") or None,
+        )
+    if raw.get("code") == ErrorCode.RUN_BUSY.value:
+        out.update(ok=False, code=ErrorCode.RUN_BUSY.value,
+                   message=raw.get("message") or "已有任务在运行")
+        control = jobs.inspect_control_plane(HOME)
+        need = control.get("needHuman") if isinstance(control.get("needHuman"), dict) else {}
+        _attach_phase_preview(
+            out,
+            phase="busy",
+            user_message="当前 WEBCLAW_HOME 仍有活跃任务（可能是未处理的验证码）。请 cancel，或弃权后 webclaw_reset，再开新 run",
+            run_dir=str(need.get("run_dir") or "") or None,
+        )
+        out.setdefault("data", {})["activeRun"] = control.get("activeRun")
+        out["data"]["waitingHuman"] = control.get("waitingHuman")
     for key in ("cancelled", "cancel_marker_error"):
         if key in data:
             out["data"][key] = data[key]
@@ -520,7 +572,7 @@ async def webclaw_run(
     """PRIMARY: execute a Chinese/English recipe ONCE (same AST).
 
     User phrases 打开/点击/输入/等待/采集/登录 are recipe VERBS — put them in `recipe`
-    (e.g. recipe="打开旧MES系统" or "打开https://a.com，等待2，采集表格"). Do NOT stop
+    (e.g. recipe="打开https://a.com，等待2，采集表格" or "登录{保险箱站点名}"). Do NOT stop
     after accounts_list. NEVER open URLs via Start-Process / default browser / open /
     xdg-open. Prefer full body; never split frozen recipes into probe steps.
 
@@ -613,11 +665,13 @@ async def webclaw_run(
             if resp is not None:
                 if resp.get("error_code") == "RUN_BUSY":
                     return scrub_obj(
-                        envelope(
-                            ok=False,
-                            code=ErrorCode.RUN_BUSY,
-                            message=resp.get("error") or "serve already has an active run",
-                            data={"via": "lite_serve", "serve": resp},
+                        _finalize(
+                            envelope(
+                                ok=False,
+                                code=ErrorCode.RUN_BUSY,
+                                message=resp.get("error") or "serve already has an active run",
+                                data={"via": "lite_serve", "serve": resp},
+                            )
                         )
                     )
                 ok = bool(resp.get("ok"))
@@ -810,6 +864,109 @@ def webclaw_set_display(headless: bool) -> dict:
 
 
 @mcp.tool()
+def webclaw_browser(action: str) -> dict:
+    """Control the local webclaw Chrome/CDP instance (single browser, multi-tab).
+
+    action=status|stop|restart. User「关掉浏览器/释放实例」→ stop.
+    NEVER PowerShell/taskkill — only this tool. stop/restart cancels any active run first.
+    """
+    action_norm = (action or "").strip().lower()
+    if action_norm not in ("status", "stop", "restart"):
+        return scrub_obj(
+            envelope(ok=False, code=ErrorCode.INVALID_ARGS, message="action must be status|stop|restart")
+        )
+    cancel_note: dict | None = None
+    if action_norm in ("stop", "restart"):
+        managed = jobs.cancel_active(home=HOME)
+        cancel_note = {
+            "code": managed.get("code"),
+            "cancelled": bool((managed.get("data") or {}).get("cancelled")),
+            "job_id": managed.get("job_id"),
+        }
+        # Ensure global cancel marker for bare CLI siblings, then clear via browser lifecycle.
+        try:
+            (HOME / "control").mkdir(parents=True, exist_ok=True)
+            if managed.get("code") == ErrorCode.RUN_CANCELLED.value:
+                (HOME / "control" / "cancel").write_text("1", encoding="utf-8")
+        except OSError:
+            pass
+        _ = _run(["cancel"], timeout=15)
+    r = _run(["browser", action_norm], timeout=60)
+    result = _finalize(r)
+    if cancel_note is not None:
+        result.setdefault("data", {})["cancel"] = cancel_note
+    if action_norm == "stop":
+        _attach_phase_preview(
+            result,
+            phase="idle",
+            user_message="浏览器实例已停止；下次 webclaw_run 会重新拉起同一调试 Chrome",
+        )
+    elif action_norm == "restart":
+        _attach_phase_preview(
+            result,
+            phase="idle",
+            user_message="浏览器已重启（仍为单实例）",
+        )
+    return scrub_obj(result)
+
+
+@mcp.tool()
+def webclaw_reset(mode: str = "soft") -> dict:
+    """Clear stuck runs / ghost cancel / abandoned NEED_HUMAN (no cross-session resume).
+
+    soft (default): cancel active → clear jobs markers → clear control/cancel → orphan HITL files.
+    hard: soft + browser stop (frees memory; next run relaunches the same single Chrome).
+    Use when RUN_BUSY / ignored captcha / phantom cancel blocks a new task.
+    """
+    mode_norm = (mode or "soft").strip().lower()
+    if mode_norm not in ("soft", "hard"):
+        return scrub_obj(
+            envelope(ok=False, code=ErrorCode.INVALID_ARGS, message="mode must be soft|hard")
+        )
+    global _serve_hitl
+    if use_serve_opt_in():
+        lite_serve_call("cancel", timeout=5.0)
+        _serve_hitl = None
+    raw = jobs.reset_home(HOME, hard=(mode_norm == "hard"))
+    browser_result = None
+    if mode_norm == "hard":
+        browser_result = _run(["browser", "stop"], timeout=60)
+        raw.setdefault("actions", []).append(
+            f"browser_stop:{browser_result.get('code') or ('OK' if browser_result.get('ok') else 'FAIL')}"
+        )
+        # Drop leftover cancel marker after stop.
+        try:
+            (HOME / "control" / "cancel").unlink(missing_ok=True)
+        except OSError:
+            pass
+        raw["after"] = jobs.inspect_control_plane(HOME)
+        raw["ok"] = not bool(raw["after"].get("busy"))
+        raw["code"] = "OK" if raw["ok"] else raw.get("code") or "RUN_BUSY"
+    result = envelope(
+        ok=bool(raw.get("ok")),
+        code=raw.get("code") or ErrorCode.OK,
+        message=raw.get("message") or "",
+        data={
+            "before": raw.get("before"),
+            "after": raw.get("after"),
+            "actions": raw.get("actions") or [],
+            "hard": mode_norm == "hard",
+            "browser": browser_result,
+        },
+    )
+    _attach_phase_preview(
+        result,
+        phase="idle" if result["ok"] else "busy",
+        user_message=(
+            "已复位，可重新 webclaw_run"
+            if result["ok"]
+            else "复位未完成：仍有活跃任务，请再试 webclaw_cancel 或 webclaw_reset(hard)"
+        ),
+    )
+    return scrub_obj(result)
+
+
+@mcp.tool()
 async def webclaw_cancel(run_id: str = "") -> dict:
     """Stop the managed child (and its cancel marker). Idle cancel is a no-op.
 
@@ -877,8 +1034,8 @@ def webclaw_last_log(lines: int = 80) -> dict:
 def webclaw_accounts_list() -> dict:
     """LOOKUP ONLY: list vault sites (id/name/url/username/has_password — never passwords).
 
-    Does NOT open a browser. After finding a site (e.g. 旧MES), still call webclaw_run
-    with a verb recipe like 打开旧MES系统 / 登录旧MES系统.
+    Does NOT open a browser. After finding a site, still call webclaw_run
+    with 打开{站点名} / 登录{站点名} (exact vault name) or an https URL.
     """
     r = _run(["accounts", "list"], timeout=30)
     return _finalize(r)

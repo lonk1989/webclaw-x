@@ -33,6 +33,7 @@ impl ChromeInstance {
         task_id: &str,
         download_dir: &Path,
         headless: bool,
+        initial_url: Option<&str>,
     ) -> Result<Arc<Self>, String> {
         let port = allocate_task_debug_port().await?;
         // 主调试 Chrome 未运行时可直接复用其 Profile（同账号 Cookie）；
@@ -45,7 +46,8 @@ impl ChromeInstance {
         std::fs::create_dir_all(&profile_dir).map_err(|e| e.to_string())?;
         std::fs::create_dir_all(download_dir).map_err(|e| e.to_string())?;
 
-        let child = launch_debug_chrome_on(&profile_dir, port, headless)?;
+        let start_url = super::sanitize_chrome_start_url(initial_url);
+        let child = launch_debug_chrome_on(&profile_dir, port, headless, start_url)?;
         let inst = Arc::new(Self {
             port,
             profile_dir,
@@ -54,7 +56,7 @@ impl ChromeInstance {
         wait_for_debug_port_on(port, 25).await?;
         let pages = list_page_targets_on(port).await.unwrap_or_default();
         if pages.is_empty() {
-            create_page_target_on(port, Some("about:blank")).await?;
+            create_page_target_on(port, start_url.or(Some("about:blank"))).await?;
         }
         if !headless {
             tokio::time::sleep(std::time::Duration::from_millis(350)).await;
@@ -82,7 +84,7 @@ impl ChromeInstance {
 
     async fn restart(&self, headless: bool) -> Result<(), String> {
         self.force_kill();
-        let child = launch_debug_chrome_on(&self.profile_dir, self.port, headless)?;
+        let child = launch_debug_chrome_on(&self.profile_dir, self.port, headless, None)?;
         *self.child.lock() = Some(child);
         wait_for_debug_port_on(self.port, 25).await?;
         if !headless {

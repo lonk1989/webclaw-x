@@ -38,6 +38,68 @@ fn remember_shared_main_target(state: &crate::AppState, client: &CdpClient) {
     *state.last_main_target.lock() = Some(client.target_id.clone());
 }
 
+/// 从菜谱前缀解析冷启动 Chrome 起始页（仅 http(s)；策略拒绝则放弃）。
+fn peek_first_chrome_launch_url(steps: &[Step]) -> Option<String> {
+    for step in steps {
+        match step.keyword.as_str() {
+            "打开" | "打开标签" => {
+                let url = resolve_chrome_launch_url(&step.args)?;
+                if crate::navigation_policy::check_navigation(&url).is_err() {
+                    return None;
+                }
+                return Some(url);
+            }
+            "登录" => {
+                let system = crate::web_systems::find_web_system_by_query(&step.args).ok()?;
+                let url = crate::web_systems::login_url_for(&system);
+                let url = url.trim();
+                if url.is_empty() {
+                    return None;
+                }
+                if !(url.starts_with("http://") || url.starts_with("https://")) {
+                    return None;
+                }
+                if crate::navigation_policy::check_navigation(url).is_err() {
+                    return None;
+                }
+                return Some(url.to_string());
+            }
+            _ => {
+                if commands::step_needs_browser(&step.keyword, &step.args) {
+                    return None;
+                }
+            }
+        }
+    }
+    None
+}
+
+fn resolve_chrome_launch_url(raw: &str) -> Option<String> {
+    let coerced = crate::web_systems::coerce_navigate_url(raw);
+    let t = coerced.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if let Some(resolved) = crate::web_systems::resolve_open_url_from_query(t) {
+        let r = resolved
+            .trim()
+            .trim_end_matches(|c: char| {
+                matches!(c, '，' | ',' | '、' | ';' | '；') || c.is_whitespace()
+            });
+        if r.starts_with("http://") || r.starts_with("https://") {
+            return Some(r.to_string());
+        }
+        if !r.is_empty() {
+            return Some(format!("https://{r}"));
+        }
+    }
+    let lower = t.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return Some(t.to_string());
+    }
+    None
+}
+
 fn emit_task_progress<R: Runtime>(
     app: &AppHandle<R>,
     task_id: &str,
@@ -476,6 +538,11 @@ pub async fn execute_recipe_for_task_from_with_params<R: Runtime>(
     let may_launch_browser = remaining
         .iter()
         .any(|s| commands::keyword_opens_browser(&s.keyword));
+    let launch_url = if may_launch_browser {
+        peek_first_chrome_launch_url(remaining)
+    } else {
+        None
+    };
 
     if !needs_browser {
         emit_task_progress(
@@ -548,7 +615,12 @@ pub async fn execute_recipe_for_task_from_with_params<R: Runtime>(
 
         // 仅「打开」「登录」可拉起；其余步骤只连接已运行的调试浏览器
         let ready = if may_launch_browser {
-            chrome::ensure_debug_chrome_ready(&state.chrome_child, false).await
+            chrome::ensure_debug_chrome_ready(
+                &state.chrome_child,
+                false,
+                launch_url.as_deref(),
+            )
+            .await
         } else {
             chrome::require_debug_chrome_ready().await
         };
@@ -581,7 +653,14 @@ pub async fn execute_recipe_for_task_from_with_params<R: Runtime>(
             flush_run_logs_to_disk(app, control, &session);
             return Ok("failed:chrome".into());
         }
-        match chrome::ensure_worker_chrome(chrome_headless, resume, task_id).await {
+        match chrome::ensure_worker_chrome(
+            chrome_headless,
+            resume,
+            task_id,
+            launch_url.as_deref(),
+        )
+        .await
+        {
             Ok((port, reused, msg)) => {
                 worker_chrome_reused = reused;
                 run_user_log::log_user(
@@ -643,8 +722,13 @@ pub async fn execute_recipe_for_task_from_with_params<R: Runtime>(
         };
         run_user_log::log_full(control, format!("任务浏览器：{mode_note}"));
 
-        let task_chrome = match chrome::ChromeInstance::spawn_for_task(task_id, &dl, chrome_headless)
-            .await
+        let task_chrome = match chrome::ChromeInstance::spawn_for_task(
+            task_id,
+            &dl,
+            chrome_headless,
+            launch_url.as_deref(),
+        )
+        .await
         {
             Ok(c) => c,
             Err(e) => {
@@ -1852,6 +1936,12 @@ pub async fn execute_recipe_for_task_from_with_params<R: Runtime>(
         let step_ms = t_step.elapsed().as_millis();
         let step_ok = result.is_ok();
         let mut fail_err: Option<String> = None;
+        // 「登录」/「点击登录」在验证码与离页校验完成前不得记为步骤成功（否则日志早报成功、HITL 仍在进行）。
+        let defer_login_success = step_ok
+            && !client.skip_next_captcha
+            && (step.keyword == "登录"
+                || (step.keyword == "点击" && is_login_submit_click_target(&step.args)));
+        let mut deferred_login_detail: Option<String> = None;
 
         match result {
             Ok(detail) => {
@@ -1868,63 +1958,76 @@ pub async fn execute_recipe_for_task_from_with_params<R: Runtime>(
                 );
                 browser_session::set_active_browser(app, &state.active_browser, task_id, &client);
                 run_artifacts::emit_artifacts_update(app, &session);
-                ok_count += 1;
-                let full_line = format!(
-                    "步骤 {idx} 成功 | {detail} | @ {} · 耗时 {step_ms} ms",
-                    run_user_log::clock_stamp()
-                );
-                let user_line = format_user_step_ok(
-                    idx as u32,
-                    total,
-                    &step_desc,
-                    &detail,
-                    reloads_used > 0,
-                    ai_repaired,
-                );
-                run_user_log::log_dual(control, state, app, full_line, user_line);
-                if let Some(rec) = control.step_records.lock().get_mut(i) {
-                    rec.status = "ok".into();
-                    rec.detail = user_step_summary(&detail);
-                    if reloads_used > 0 {
-                        rec.detail = format!("{} · 已自动恢复", rec.detail);
+                if defer_login_success {
+                    deferred_login_detail = Some(detail.clone());
+                    let full_line = format!(
+                        "步骤 {idx} 已提交登录，等待验证码/结果… | {detail} | @ {} · 已耗时 {step_ms} ms",
+                        run_user_log::clock_stamp()
+                    );
+                    run_user_log::log_full(control, full_line);
+                    if let Some(rec) = control.step_records.lock().get_mut(i) {
+                        rec.status = "running".into();
+                        rec.detail = user_step_summary(&detail);
                     }
-                    if ai_repaired {
-                        rec.detail = format!("{} · 已 AI 修复", rec.detail);
+                } else {
+                    ok_count += 1;
+                    let full_line = format!(
+                        "步骤 {idx} 成功 | {detail} | @ {} · 耗时 {step_ms} ms",
+                        run_user_log::clock_stamp()
+                    );
+                    let user_line = format_user_step_ok(
+                        idx as u32,
+                        total,
+                        &step_desc,
+                        &detail,
+                        reloads_used > 0,
+                        ai_repaired,
+                    );
+                    run_user_log::log_dual(control, state, app, full_line, user_line);
+                    if let Some(rec) = control.step_records.lock().get_mut(i) {
+                        rec.status = "ok".into();
+                        rec.detail = user_step_summary(&detail);
+                        if reloads_used > 0 {
+                            rec.detail = format!("{} · 已自动恢复", rec.detail);
+                        }
+                        if ai_repaired {
+                            rec.detail = format!("{} · 已 AI 修复", rec.detail);
+                        }
                     }
-                }
-                if let Some(plan) = last_repair_plan.as_ref() {
-                    let host = browser_context::hostname_from_url(&client.target_url);
-                    let key = ai_repair::cache_fingerprint(&host, &cache_step, &last_fail_err);
-                    ai_repair::remember_successful_plan(&key, plan);
-                }
-                if let Some(anchor) = page_recovery::anchor_after_success(&step) {
-                    last_anchor = Some(anchor);
-                }
-                maybe_write_live_preview(
-                    &mut client,
-                    &session,
-                    &mut last_live_preview_at,
-                    idx as u32,
-                    total,
-                    &step.keyword,
-                    chrome_headless,
-                    control,
-                )
-                .await;
-                // 试探分支最后一步成功 → 整组试探成功，后续备选将被跳过
-                if let Some(og) = &step.or_group {
-                    if og.branch == OrBranch::Try {
-                        let more_try = steps.get(i + 1).is_some_and(|next| {
-                            next.or_group.as_ref().is_some_and(|g| {
-                                g.id == og.id && g.branch == OrBranch::Try
-                            })
-                        });
-                        if !more_try {
-                            or_try_ok.insert(og.id, true);
-                            run_user_log::log_full(
-                                control,
-                                format!("步骤 {idx} 试探成功，跳过同组备选分支"),
-                            );
+                    if let Some(plan) = last_repair_plan.as_ref() {
+                        let host = browser_context::hostname_from_url(&client.target_url);
+                        let key = ai_repair::cache_fingerprint(&host, &cache_step, &last_fail_err);
+                        ai_repair::remember_successful_plan(&key, plan);
+                    }
+                    if let Some(anchor) = page_recovery::anchor_after_success(&step) {
+                        last_anchor = Some(anchor);
+                    }
+                    maybe_write_live_preview(
+                        &mut client,
+                        &session,
+                        &mut last_live_preview_at,
+                        idx as u32,
+                        total,
+                        &step.keyword,
+                        chrome_headless,
+                        control,
+                    )
+                    .await;
+                    // 试探分支最后一步成功 → 整组试探成功，后续备选将被跳过
+                    if let Some(og) = &step.or_group {
+                        if og.branch == OrBranch::Try {
+                            let more_try = steps.get(i + 1).is_some_and(|next| {
+                                next.or_group.as_ref().is_some_and(|g| {
+                                    g.id == og.id && g.branch == OrBranch::Try
+                                })
+                            });
+                            if !more_try {
+                                or_try_ok.insert(og.id, true);
+                                run_user_log::log_full(
+                                    control,
+                                    format!("步骤 {idx} 试探成功，跳过同组备选分支"),
+                                );
+                            }
                         }
                     }
                 }
@@ -2216,10 +2319,16 @@ pub async fn execute_recipe_for_task_from_with_params<R: Runtime>(
                         run_user_log::log_user(control, state, app, "已停止：中止后续步骤");
                         break;
                     }
-                    let err = if e.contains("已取消") {
+                    // Keep credential/setup failures unwrapped — do not brand them as captcha.
+                    let err = if e.contains("已取消")
+                        || e.starts_with("登录失败")
+                        || e.contains("网站账号")
+                        || e.contains("未从保险箱")
+                        || e.contains("未取得密码")
+                    {
                         e
                     } else {
-                        format!("验证码未通过，登录中断：{e}")
+                        format!("登录中断：{e}")
                     };
                     mark_login_interrupted(
                         control,
@@ -2232,7 +2341,8 @@ pub async fn execute_recipe_for_task_from_with_params<R: Runtime>(
                         &err,
                         &mut ok_count,
                         &mut fail_count,
-                        step_ok,
+                        // 延后记账时尚未计入 ok，勿回滚
+                        step_ok && deferred_login_detail.is_none(),
                     );
                     maybe_analyze_step_failure(
                         app,
@@ -2269,15 +2379,62 @@ pub async fn execute_recipe_for_task_from_with_params<R: Runtime>(
             } else {
             match login_verify::await_login_outcome(&mut client, Some(&control.cancel)).await {
                 Ok(note) => {
-                    run_user_log::log_user(control, state, app, note.clone());
-                    if let Some(rec) = control.step_records.lock().get_mut(i) {
-                        if rec.status == "ok" && !note.is_empty() {
-                            let base = user_step_summary(&rec.detail);
-                            rec.detail = if base.is_empty() {
-                                note
-                            } else {
-                                format!("{base} · {note}")
-                            };
+                    if let Some(base_detail) = deferred_login_detail.take() {
+                        let final_ms = t_step.elapsed().as_millis();
+                        let detail = if note.is_empty() {
+                            base_detail
+                        } else {
+                            format!("{base_detail} · {note}")
+                        };
+                        ok_count += 1;
+                        let full_line = format!(
+                            "步骤 {idx} 成功 | {detail} | @ {} · 耗时 {final_ms} ms",
+                            run_user_log::clock_stamp()
+                        );
+                        let user_line = format_user_step_ok(
+                            idx as u32,
+                            total,
+                            &step_desc,
+                            &detail,
+                            reloads_used > 0,
+                            ai_repaired,
+                        );
+                        run_user_log::log_dual(control, state, app, full_line, user_line);
+                        if let Some(rec) = control.step_records.lock().get_mut(i) {
+                            rec.status = "ok".into();
+                            rec.detail = user_step_summary(&detail);
+                        }
+                        if let Some(plan) = last_repair_plan.as_ref() {
+                            let host = browser_context::hostname_from_url(&client.target_url);
+                            let key =
+                                ai_repair::cache_fingerprint(&host, &cache_step, &last_fail_err);
+                            ai_repair::remember_successful_plan(&key, plan);
+                        }
+                        if let Some(anchor) = page_recovery::anchor_after_success(&step) {
+                            last_anchor = Some(anchor);
+                        }
+                        maybe_write_live_preview(
+                            &mut client,
+                            &session,
+                            &mut last_live_preview_at,
+                            idx as u32,
+                            total,
+                            &step.keyword,
+                            chrome_headless,
+                            control,
+                        )
+                        .await;
+                    } else {
+                        run_user_log::log_user(control, state, app, note.clone());
+                        if let Some(rec) = control.step_records.lock().get_mut(i) {
+                            if rec.status == "ok" && !note.is_empty() {
+                                let base = user_step_summary(&rec.detail);
+                                rec.detail = if base.is_empty() {
+                                    note
+                                } else {
+                                    format!("{base} · {note}")
+                                };
+                            }
                         }
                     }
                 }
@@ -2297,7 +2454,7 @@ pub async fn execute_recipe_for_task_from_with_params<R: Runtime>(
                         &e,
                         &mut ok_count,
                         &mut fail_count,
-                        true,
+                        deferred_login_detail.is_none(),
                     );
                     maybe_analyze_step_failure(
                         app,

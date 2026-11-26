@@ -212,10 +212,20 @@ fn publish_human_inbox(
 }
 
 fn clear_human_inbox() {
-    // 保留 last-captcha.png 供助手补发；把收件箱归档便于事后排查
+    // 保留 last-captcha.png 供助手补发；把收件箱归档便于事后排查。
+    // 归档时强制 waiting=false，避免 lite/状态探测把已结束的 HITL 当成仍在等待。
     if let Ok(raw) = std::fs::read_to_string(human_inbox_json()) {
         let archive = crate::paths::app_data_dir().join("last-need-human.json");
-        let _ = std::fs::write(archive, raw);
+        let body = match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(mut v) => {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("waiting".into(), serde_json::json!(false));
+                }
+                serde_json::to_vec_pretty(&v).unwrap_or_else(|_| raw.into_bytes())
+            }
+            Err(_) => raw.into_bytes(),
+        };
+        let _ = std::fs::write(archive, body);
     }
     let _ = std::fs::remove_file(human_inbox_json());
 }

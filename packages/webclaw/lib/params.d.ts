@@ -14,7 +14,7 @@ export interface RecipeParamKv {
  * Escape sequences `\,` `\，` keep the comma literal (same idea as runtime).
  *
  * Newlines become `，` (not empty): otherwise
- * `参数原因=家中有事\n登录EHR系统` collapses to `参数原因=家中有事登录EHR系统`
+ * `参数原因=家中有事\n登录演示系统` collapses to `参数原因=家中有事登录演示系统`
  * and the login step is lost.
  */
 export declare function splitRecipeSteps(content: string): string[];

@@ -12,7 +12,7 @@ Schema ``webclaw.host-vault.v1``::
       "host": "fengxing",
       "exportedAt": "2026-11-09T00:00:00Z",
       "systems": [
-        {"id": "ehr", "name": "EHR系统", "url": "https://…", "username": "u", "password": "…"}
+        {"id": "my-app", "name": "演示系统", "url": "https://…", "username": "u", "password": "…"}
       ],
       "signature": "<optional hex HMAC-SHA256 of body without signature>"
     }

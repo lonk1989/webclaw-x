@@ -67,6 +67,13 @@ import {
 } from './accounts-vault.js'
 import { registerBundledSkill } from './skill.js'
 import { clearLiveFocus, publishLiveFocus } from './live-focus.js'
+import {
+  attachPhasePreview,
+  clearCancelMarker,
+  mergeStatusControlPlane,
+  resetHome,
+  type AgentPhase,
+} from './control-plane.js'
 
 /** Cordis plugin id. */
 export const name = 'webclaw'
@@ -256,7 +263,7 @@ async function ensureConfiguredSystems(
 
 function formatParamForm(params: readonly RecipeParamKv[]): string {
   const rows = params.map(p => {
-    // Strip accidental verb glue from older clients (家中有事登录EHR系统).
+    // Strip accidental verb glue from older clients (家中有事登录演示系统).
     let value = p.value || '（空）'
     value = value.replace(/登录[\u4e00-\u9fffA-Za-z0-9_-]*$/u, '').trim() || value
     return `- ${p.name}：${value}`
@@ -527,6 +534,7 @@ async function resolveNeedHumanWithUser(
       }>
       cwd?: string
       sessionId?: string
+      home?: string
       vision?: { preferOcr: boolean; supportsImage: boolean }
       captchaOcrText?: string
     }
@@ -646,23 +654,34 @@ function finalizeRunResult(
     }>
     cwd?: string
     sessionId?: string
+    home?: string
     /** When set, text-only models get OCR text instead of an image block. */
     vision?: { preferOcr: boolean; supportsImage: boolean }
     /** Precomputed OCR for captcha when preferOcr. */
     captchaOcrText?: string
   },
 ): Record<string, any> {
+  const homeForPreview = ctx.home?.trim() || resolveWebclawHome({})
   if (result.cancelled) {
-    return {
-      ok: false,
-      cancelled: true,
-      code: 'RUN_CANCELLED',
-      error: '已取消（Host 停止或 webclaw_cancel）',
-      run_dir: result.run_dir || '',
-      eventsTail: redactSecrets(result.stdout.slice(-4000)),
-      recipePath: ctx.path,
-      params: ctx.mergedParams,
-    }
+    return attachPhasePreview(
+      {
+        ok: false,
+        cancelled: true,
+        code: 'RUN_CANCELLED',
+        error: '已取消（Host 停止或 webclaw_cancel）',
+        run_dir: result.run_dir || '',
+        eventsTail: redactSecrets(result.stdout.slice(-4000)),
+        recipePath: ctx.path,
+        params: ctx.mergedParams,
+      },
+      {
+        phase: 'cancelled',
+        userMessage:
+          '任务已取消（Host 停止或 webclaw_cancel）；侧栏保留最后一帧。要开新任务请先 webclaw_status，必要时 webclaw_reset',
+        home: homeForPreview,
+        runDir: result.run_dir || '',
+      },
+    )
   }
   if (result.earlyHitl && result.needHuman) {
     const nh = result.needHuman
@@ -676,26 +695,36 @@ function finalizeRunResult(
       ''
     const preferOcr = ctx.vision?.preferOcr !== false && ctx.vision?.supportsImage !== true
     const ocrText = (ctx.captchaOcrText || '').trim()
-    return {
-      ok: false,
-      needHuman: true,
-      code: 'NEED_HUMAN',
-      error: preferOcr
-        ? 'NEED_HUMAN：当前模型无可靠读图能力。已尽量 OCR；请把识别文字/路径给用户确认，索要验证码字符后 webclaw_human_reply。禁止把原图塞给文本模型。'
-        : 'NEED_HUMAN：必须立刻向用户展示验证码图并索要字符，禁止自行猜测/空等/只说「请查看浏览器」。拿到字符后调用 webclaw_human_reply(mode="text", text=用户输入, run_dir=本字段)。禁止在未询问用户的情况下继续其它工具。',
-      hint,
-      kind: typeof nh.kind === 'string' ? nh.kind : 'captcha',
-      prompt_id: typeof nh.prompt_id === 'string' ? nh.prompt_id : '',
-      image_path: image,
-      // Text-only models: omit image injection in render when we have OCR / preferOcr.
-      injectImage: !preferOcr,
-      ocrText: ocrText || undefined,
-      preferOcr,
-      run_dir: result.run_dir || '',
-      eventsTail: redactSecrets(result.stdout.slice(-4000)),
-      recipePath: ctx.path,
-      params: ctx.mergedParams,
-    }
+    const runDir = result.run_dir || ''
+    return attachPhasePreview(
+      {
+        ok: false,
+        needHuman: true,
+        code: 'NEED_HUMAN',
+        error: preferOcr
+          ? 'NEED_HUMAN：当前模型无可靠读图能力。已尽量 OCR；请把识别文字/路径给用户确认，索要验证码字符后 webclaw_human_reply。禁止把原图塞给文本模型。'
+          : 'NEED_HUMAN：必须立刻向用户展示验证码图并索要字符，禁止自行猜测/空等/只说「请查看浏览器」。拿到字符后调用 webclaw_human_reply(mode="text", text=用户输入, run_dir=本字段)。禁止在未询问用户的情况下继续其它工具。',
+        hint,
+        kind: typeof nh.kind === 'string' ? nh.kind : 'captcha',
+        prompt_id: typeof nh.prompt_id === 'string' ? nh.prompt_id : '',
+        image_path: image,
+        // Text-only models: omit image injection in render when we have OCR / preferOcr.
+        injectImage: !preferOcr,
+        ocrText: ocrText || undefined,
+        preferOcr,
+        run_dir: runDir,
+        eventsTail: redactSecrets(result.stdout.slice(-4000)),
+        recipePath: ctx.path,
+        params: ctx.mergedParams,
+      },
+      {
+        phase: 'need_human',
+        userMessage:
+          '等待人工确认/验证码：请看右侧「执行画面」或 preview 中的图片路径，回复后调用 webclaw_human_reply。弃权验证码请 cancel/reset，不要换会话硬开 run',
+        home: homeForPreview,
+        runDir,
+      },
+    )
   }
   const done = parseDoneEvent(result.stdout)
   const ok =
@@ -944,11 +973,11 @@ export function apply(ctx: Context, config: Config): void {
         defineTool({
           name: 'webclaw_status',
           description:
-            'Check local webclaw-lite readiness (Chrome path, product, chromeOk). Prefer this before run when unsure the CLI is installed. On Windows / macOS, missing lite is auto-downloaded from GitHub Releases.',
+            'Check readiness + control plane: chromeOk/cdpReady plus busy / waitingHuman / cancelMarkerPresent / orphanRisk / preview. Call before a new run when unsure, or after cancel. If busy/HITL blocks a new task → webclaw_cancel; still dirty → webclaw_reset(soft|hard). On Windows / macOS, missing lite is auto-downloaded.',
           parameters: {
             run_id: {
               type: 'string',
-              description: 'Optional run id to query waiting-human state',
+              description: 'Optional run id to query waiting-human state (passed to lite)',
             },
           },
           output: {
@@ -958,16 +987,21 @@ export function apply(ctx: Context, config: Config): void {
             ],
           },
           async execute(args): Promise<Record<string, any>> {
+            const home = resolveWebclawHome({ webclawHome: config.webclawHome })
             let ensured: EnsureLiteResult
             try {
               ensured = await ready()
             } catch (error) {
-              return {
-                ok: false,
-                product: 'webclaw-lite',
-                error: error instanceof Error ? error.message : String(error),
-                binaryPath: resolveBinaryPath(config),
-              }
+              return mergeStatusControlPlane(
+                {
+                  ok: false,
+                  product: 'webclaw-lite',
+                  error: error instanceof Error ? error.message : String(error),
+                  binaryPath: resolveBinaryPath(config),
+                  home,
+                },
+                home,
+              )
             }
             const argv = ['status']
             if (args.run_id?.trim()) {
@@ -991,7 +1025,8 @@ export function apply(ctx: Context, config: Config): void {
             }
             status.exitCode = result.code ?? -1
             status.binaryPath = ensured.binaryPath
-            return status
+            status.home = status.home || home
+            return mergeStatusControlPlane(status, home)
           },
         }),
       ),
@@ -1004,12 +1039,12 @@ export function apply(ctx: Context, config: Config): void {
         defineTool({
           name: 'webclaw_run',
           description:
-            'PRIMARY tool for browser RPA. User phrases 打开/点击/输入/等待/采集/登录 are recipe VERBS — call this with a Chinese recipe string (e.g. recipe="打开旧MES系统" or "打开https://a.com，等待5，采集表格"). Do NOT stop after accounts lookup. NEVER open via Start-Process / default browser. Full/frozen recipe → ONE call (prefer recipePath). KEEP 参数名=值 / {{名}} — never expand defaults into the body before run. Host confirms params once per session; on failure→patch retry REUSE the same params (paramsConfirmed=true + params object) — do NOT re-ask or blank them. Probe steps: keep `(点击取消?)` / `（点击已有项？点击新建）` literally — runtime try/skip-or-fallback; NEVER strip parentheses+?. Ask early on failure: ONE cheap short patch; control-not-found / download pending=0 → STOP and ask. Agent download waits: 等待下载30/60. No CSS/Playwright. Agent second-waits: ONLY 等待2/等待5.',
+            'PRIMARY tool for browser RPA. User phrases 打开/点击/输入/等待/采集/登录 are recipe VERBS — call this with a Chinese recipe string (e.g. recipe="打开https://a.com，等待5，采集表格" or "登录{保险箱站点名}，等待5"). Collect categories ONLY: 表格/标题/按钮/链接/输入框/其它文字, or bare 采集 (=all); never invent labels like 页面主要内容. Do NOT stop after accounts lookup. NEVER open via Start-Process / default browser. Full/frozen recipe → ONE call (prefer recipePath). KEEP 参数名=值 / {{名}} — never expand defaults into the body before run. Host confirms params once per session; on failure→patch retry REUSE the same params (paramsConfirmed=true + params object) — do NOT re-ask or blank them. Probe steps: keep `(点击取消?)` / `（点击已有项？点击新建）` literally — runtime try/skip-or-fallback; NEVER strip parentheses+?. Ask early on failure: ONE cheap short patch; control-not-found / download pending=0 → STOP and ask. Agent download waits: 等待下载30/60. No CSS/Playwright. Agent second-waits: ONLY 等待2/等待5.',
           parameters: {
             recipe: {
               type: 'string',
               description:
-                'Inline Chinese recipe using verbs 打开/登录/点击/输入/等待/采集… joined by ，. Example: 登录旧MES系统，等待5  or  点击保存，等待2. Agent may ONLY use 等待{秒数}; do not invent wait text/targets. User saying「打开MES」→ put that verb into this field and run. Mutually exclusive with recipePath.',
+                'Inline Chinese recipe using verbs 打开/登录/点击/输入/等待/采集… joined by ，. Example: 打开https://a.com，等待5  or  登录{保险箱站点名}，等待5  or  点击保存，等待2. Agent may ONLY use 等待{秒数}; do not invent wait text/targets. User saying「打开某某」→ put that verb (URL or exact vault site name) into this field and run. Mutually exclusive with recipePath.',
             },
             recipePath: {
               type: 'string',
@@ -1062,6 +1097,8 @@ export function apply(ctx: Context, config: Config): void {
               if (v.needHuman) {
                 const preferOcr = (v as { preferOcr?: boolean }).preferOcr === true
                 const ocrText = String((v as { ocrText?: string }).ocrText || '').trim()
+                const userMessage = String((v as { userMessage?: string }).userMessage || '').trim()
+                const phase = String((v as { phase?: string }).phase || '').trim()
                 const injectImage =
                   (v as { injectImage?: boolean }).injectImage !== false && !preferOcr
                 const blocks: Array<{ type: string; text?: string; source?: unknown }> = [{
@@ -1070,6 +1107,8 @@ export function apply(ctx: Context, config: Config): void {
                     preferOcr
                       ? 'webclaw_run: NEED_HUMAN（当前模型无读图；已走本地 OCR，请向用户确认验证码）'
                       : 'webclaw_run: NEED_HUMAN（请立刻把验证码图给用户看，并索要字符）',
+                    phase ? `phase: ${phase}` : '',
+                    userMessage ? `userMessage: ${userMessage}` : '',
                     v.hint ? `hint: ${v.hint}` : '',
                     ocrText ? `ocr: ${ocrText}` : '',
                     v.image_path ? `image: ${v.image_path}` : '',
@@ -1320,6 +1359,7 @@ export function apply(ctx: Context, config: Config): void {
               missingCreds,
               cwd: agentCwd(exec),
               sessionId: agentSessionId(exec),
+              home,
               vision: {
                 preferOcr: vision.preferOcr,
                 supportsImage: vision.supportsImage,
@@ -1435,23 +1475,40 @@ export function apply(ctx: Context, config: Config): void {
               }
             }
             const result = await runLite(lite, ['browser', action])
+            if (action === 'stop' || action === 'restart') {
+              clearCancelMarker(home)
+            }
             const text = `${result.stdout}\n${result.stderr}`.trim()
             const parsed = parseJsonObject(result.stdout) ?? parseJsonObject(text)
-            if (parsed) {
-              return {
-                ...parsed,
-                ok: parsed.ok !== false && (result.code === 0 || result.code == null),
-                exitCode: result.code ?? -1,
-                ...(cancelNote ? { cancel: cancelNote } : {}),
-              }
+            const base: Record<string, any> = parsed
+              ? {
+                  ...parsed,
+                  ok: parsed.ok !== false && (result.code === 0 || result.code == null),
+                  exitCode: result.code ?? -1,
+                  ...(cancelNote ? { cancel: cancelNote } : {}),
+                }
+              : {
+                  ok: result.code === 0,
+                  exitCode: result.code ?? -1,
+                  action,
+                  raw: text.slice(0, 2000),
+                  ...(cancelNote ? { cancel: cancelNote } : {}),
+                }
+            if (action === 'stop') {
+              return attachPhasePreview(base, {
+                phase: 'idle',
+                userMessage: '浏览器实例已停止；下次 webclaw_run 会重新拉起同一调试 Chrome',
+                home,
+              })
             }
-            return {
-              ok: result.code === 0,
-              exitCode: result.code ?? -1,
-              action,
-              raw: text.slice(0, 2000),
-              ...(cancelNote ? { cancel: cancelNote } : {}),
+            if (action === 'restart') {
+              return attachPhasePreview(base, {
+                phase: 'idle',
+                userMessage: '浏览器已重启（仍为单实例）',
+                home,
+              })
             }
+            return base
           },
         }),
       ),
@@ -1464,7 +1521,7 @@ export function apply(ctx: Context, config: Config): void {
         defineTool({
           name: 'webclaw_accounts_status',
           description:
-            'LOOKUP ONLY: list local vault sites (id/name/url/username/has_password — NEVER passwords). Does NOT open a browser. After finding a site (e.g. 旧MES), you MUST still call webclaw_run with a recipe verb like 打开旧MES系统 / 登录旧MES系统. SSO URLs need NO password. Never ask for passwords or invent accounts-set CLI.',
+            'LOOKUP ONLY: list local vault sites (id/name/url/username/has_password — NEVER passwords). Does NOT open a browser. After finding a site, you MUST still call webclaw_run with 打开{站点名} / 登录{站点名} (exact vault name) or an https URL. SSO URLs need NO password. Never ask for passwords or invent accounts-set CLI. Do not invent built-in site aliases.',
           parameters: {},
           output: {
             schema: { type: 'object', additionalProperties: true },
@@ -2182,12 +2239,14 @@ export function apply(ctx: Context, config: Config): void {
             if (!continued) {
               return { ok: true, exitCode: 0, note: 'reply written' }
             }
+            const home = resolveWebclawHome({ webclawHome: config.webclawHome })
             return finalizeRunResult(continued, {
               path: args.run_dir?.trim() || '',
               mergedParams: [],
               missingCreds: [],
               cwd: agentCwd(exec),
               sessionId: agentSessionId(exec),
+              home,
             })
           },
         }),
@@ -2201,7 +2260,7 @@ export function apply(ctx: Context, config: Config): void {
         defineTool({
           name: 'webclaw_cancel',
           description:
-            'Stop the current webclaw-lite run immediately (Host Stop should also abort the in-flight webclaw_run). Writes control/cancel and kills the child.',
+            'Stop the current webclaw-lite run immediately (Host Stop should also abort the in-flight webclaw_run). Writes control/cancel and kills the child. If still busy/HITL after cancel, use webclaw_reset.',
           parameters: {},
           output: {
             schema: { type: 'object', additionalProperties: true },
@@ -2215,17 +2274,116 @@ export function apply(ctx: Context, config: Config): void {
             const hitlCancelled = cancelActiveHitl(home)
             writeCancelMarker(home)
             const result = await runLite(lite, ['cancel'])
-            return {
-              ok: true,
-              cancelled: true,
-              hitlCancelled,
-              exitCode: result.code ?? -1,
-              stdout: result.stdout.trim().slice(0, 1000),
-              stderr: result.stderr.trim().slice(0, 500),
-            }
+            return attachPhasePreview(
+              {
+                ok: true,
+                cancelled: true,
+                code: 'RUN_CANCELLED',
+                hitlCancelled,
+                exitCode: result.code ?? -1,
+                stdout: result.stdout.trim().slice(0, 1000),
+                stderr: result.stderr.trim().slice(0, 500),
+              },
+              {
+                phase: 'cancelled' as AgentPhase,
+                userMessage:
+                  '已请求取消；侧栏保留最后一帧。开新任务前 webclaw_status；仍脏用 webclaw_reset(soft|hard)',
+                home,
+              },
+            )
           },
         }),
       ),
     'webclaw: tool webclaw_cancel',
+  )
+
+  ctx.effect(
+    () =>
+      ctx.tools.register(
+        defineTool({
+          name: 'webclaw_reset',
+          description:
+            'Clear stuck runs / ghost NEED_HUMAN / phantom cancel (no cross-session captcha resume). soft (default): cancel in-process → clear jobs markers → clear control/cancel → orphan waiting_human. hard: soft + browser stop (frees Chrome; next run relaunches). Use when status shows busy/waitingHuman/cancelMarkerPresent/orphanRisk and cancel is not enough.',
+          parameters: {
+            mode: {
+              type: 'string',
+              description: 'soft | hard (default soft)',
+            },
+          },
+          output: {
+            schema: { type: 'object', additionalProperties: true },
+            render: (_args, value) => [
+              { type: 'text', text: JSON.stringify(value, null, 2) },
+            ],
+          },
+          async execute(args): Promise<Record<string, any>> {
+            const mode = String(args.mode ?? 'soft')
+              .trim()
+              .toLowerCase()
+            if (mode !== 'soft' && mode !== 'hard') {
+              throw new Error('mode must be soft | hard')
+            }
+            const home = resolveWebclawHome({ webclawHome: config.webclawHome })
+            const raw = resetHome(home, { hard: mode === 'hard' })
+            let browser: Record<string, any> | undefined
+            if (mode === 'hard') {
+              try {
+                const ensured = await ready()
+                const lite = liteEnvFrom(config, ensured, 60_000)
+                writeCancelMarker(home)
+                await runLite(lite, ['cancel']).catch(() => undefined)
+                const stop = await runLite(lite, ['browser', 'stop'])
+                clearCancelMarker(home)
+                const text = `${stop.stdout}\n${stop.stderr}`.trim()
+                browser = {
+                  ok: stop.code === 0 || stop.code == null,
+                  exitCode: stop.code ?? -1,
+                  raw: text.slice(0, 1000),
+                }
+                raw.actions.push(`browser_stop:${browser.ok ? 'OK' : 'FAIL'}`)
+              } catch (e) {
+                browser = {
+                  ok: false,
+                  error: String((e as Error)?.message || e).slice(0, 300),
+                }
+                raw.actions.push('browser_stop:FAIL')
+              }
+            }
+            // Re-inspect after optional browser stop.
+            const afterHard = mode === 'hard' ? mergeStatusControlPlane({}, home) : null
+            const ok =
+              mode === 'hard'
+                ? !afterHard?.busy && !afterHard?.waitingHuman && !afterHard?.cancelMarkerPresent
+                : raw.ok
+            const payload: Record<string, any> = {
+              ok,
+              code: ok ? 'OK' : 'RUN_BUSY',
+              message: ok
+                ? '已复位，可重新 webclaw_run'
+                : '复位未完成：仍有活跃任务，请再试 webclaw_cancel 或 webclaw_reset(hard)',
+              before: raw.before,
+              after: afterHard
+                ? {
+                    busy: afterHard.busy,
+                    activeRun: afterHard.activeRun,
+                    waitingHuman: afterHard.waitingHuman,
+                    needHuman: afterHard.needHuman,
+                    cancelMarkerPresent: afterHard.cancelMarkerPresent,
+                    orphanRisk: afterHard.orphanRisk,
+                  }
+                : raw.after,
+              actions: raw.actions,
+              hard: mode === 'hard',
+              ...(browser ? { browser } : {}),
+            }
+            return attachPhasePreview(payload, {
+              phase: ok ? 'idle' : 'busy',
+              userMessage: payload.message,
+              home,
+            })
+          },
+        }),
+      ),
+    'webclaw: tool webclaw_reset',
   )
 }

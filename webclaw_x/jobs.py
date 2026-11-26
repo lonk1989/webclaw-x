@@ -6,17 +6,23 @@ Lock order is always _guard then flock; flock protects lifecycle transactions.
 from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timezone
-import fcntl
 import json
 import os
 import queue
 import re
 import signal
 import subprocess
+import sys
 import threading
 import time
 import uuid
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # Windows — use msvcrt locking on the lock file
+    fcntl = None  # type: ignore
+    import msvcrt
 
 _jobs: dict[str, 'LiveRun'] = {}
 _guard = threading.RLock()
@@ -32,12 +38,25 @@ def _disk_guard(home):
     directory = home / 'jobs'
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     # Never unlink the inode on which other gateways may already be waiting.
-    with (directory / '.lock').open('a', encoding='utf-8') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        try:
-            yield directory
-        finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
+    with (directory / '.lock').open('a+', encoding='utf-8') as lock:
+        if fcntl is not None:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                yield directory
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+        else:
+            lock.seek(0)
+            if lock.read(1) == '':
+                lock.write('0')
+                lock.flush()
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield directory
+            finally:
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def _process_info(pid):
@@ -352,6 +371,186 @@ def active_job_ids() -> list[str]:
 
 def has_active() -> bool:
     return bool(active_job_ids())
+
+
+def cancel_marker_present(home=None) -> bool:
+    return (_home(home) / 'control' / 'cancel').is_file()
+
+
+def _need_human_from_job(job: 'LiveRun') -> dict | None:
+    waiting = job.waiting if isinstance(job.waiting, dict) else None
+    run_dir = job.run_dir or (waiting or {}).get('run_dir') or ''
+    if not waiting and run_dir:
+        waiting_path = Path(run_dir) / 'human' / 'waiting_human.json'
+        if waiting_path.is_file():
+            try:
+                waiting = json.loads(waiting_path.read_text(encoding='utf-8'))
+            except (OSError, ValueError, TypeError):
+                waiting = {'run_dir': run_dir}
+    if not waiting and job.metadata.get('status') != 'need_human':
+        return None
+    waiting = waiting or {}
+    return {
+        'run_id': job.id,
+        'run_dir': run_dir or waiting.get('run_dir') or '',
+        'prompt_id': waiting.get('prompt_id'),
+        'kind': waiting.get('kind') or waiting.get('type'),
+        'hint': waiting.get('hint') or waiting.get('message'),
+    }
+
+
+def _need_human_from_row(home: Path, row: dict) -> dict | None:
+    if row.get('status') != 'need_human':
+        return None
+    runs = home / 'runs'
+    if not runs.is_dir():
+        return {'run_id': row['id'], 'run_dir': '', 'prompt_id': None, 'kind': None, 'hint': None}
+    newest = None
+    for path in sorted(runs.glob('*/human/waiting_human.json'), key=lambda p: p.stat().st_mtime, reverse=True):
+        newest = path
+        break
+    payload = {}
+    run_dir = ''
+    if newest is not None:
+        run_dir = str(newest.parent.parent)
+        try:
+            payload = json.loads(newest.read_text(encoding='utf-8'))
+        except (OSError, ValueError, TypeError):
+            payload = {}
+    return {
+        'run_id': row['id'],
+        'run_dir': run_dir or payload.get('run_dir') or '',
+        'prompt_id': payload.get('prompt_id'),
+        'kind': payload.get('kind') or payload.get('type'),
+        'hint': payload.get('hint') or payload.get('message'),
+    }
+
+
+def inspect_control_plane(home=None) -> dict:
+    """Host-fast snapshot: busy / activeRun / HITL / cancel marker (no lite spawn)."""
+    target = _home(home)
+    marker = (target / 'control' / 'cancel').is_file()
+    active = None
+    need_human = None
+    try:
+        with _guard, _disk_guard(target):
+            rows = _records(target)
+            local = [j for j in _jobs.values()
+                     if j.home == target and j.proc.poll() is None]
+            if local:
+                job = local[0]
+                active = {
+                    'id': job.id,
+                    'status': job.metadata.get('status') or 'running',
+                    'startedAt': job.metadata.get('started_at'),
+                }
+                if active['status'] == 'need_human' or job.waiting:
+                    need_human = _need_human_from_job(job)
+            elif rows:
+                row = rows[0]
+                active = {
+                    'id': row['id'],
+                    'status': row.get('status') or 'running',
+                    'startedAt': row.get('started_at'),
+                }
+                need_human = _need_human_from_row(target, row)
+    except (OSError, ValueError):
+        # Fail open for status: report marker only; Host can still call reset.
+        return {
+            'busy': False,
+            'activeRun': None,
+            'waitingHuman': False,
+            'needHuman': None,
+            'cancelMarkerPresent': marker,
+        }
+    return {
+        'busy': active is not None,
+        'activeRun': active,
+        'waitingHuman': need_human is not None,
+        'needHuman': need_human,
+        'cancelMarkerPresent': marker,
+    }
+
+
+def clear_stale_hitl_markers(home=None) -> list[str]:
+    """Remove orphan waiting_human files when no live job owns the run dir."""
+    target = _home(home)
+    cleared: list[str] = []
+    runs = target / 'runs'
+    if not runs.is_dir():
+        return cleared
+    live_dirs = set()
+    with _guard:
+        for job in _jobs.values():
+            if job.home == target and job.proc.poll() is None and job.run_dir:
+                try:
+                    live_dirs.add(str(Path(job.run_dir).resolve()))
+                except OSError:
+                    live_dirs.add(job.run_dir)
+    for path in runs.glob('*/human/waiting_human.json'):
+        run_dir = path.parent.parent
+        try:
+            resolved = str(run_dir.resolve())
+        except OSError:
+            resolved = str(run_dir)
+        if resolved in live_dirs:
+            continue
+        try:
+            path.unlink(missing_ok=True)
+            cleared.append(str(path))
+        except OSError:
+            continue
+    return cleared
+
+
+def reset_home(home=None, *, hard: bool = False) -> dict:
+    """Abandon stuck runs: cancel → clear jobs/markers/HITL orphans. hard also signals browser stop.
+
+    Does not resume NEED_HUMAN across sessions. Caller performs browser stop when hard=True.
+    """
+    target = _home(home)
+    actions: list[str] = []
+    before = inspect_control_plane(target)
+    cancel = cancel_active(home=target)
+    actions.append(f"cancel:{cancel.get('code')}")
+    try:
+        with _guard, _disk_guard(target):
+            for path in list((target / 'jobs').glob('*.json')):
+                path.unlink(missing_ok=True)
+                actions.append(f"unlink:{path.name}")
+            for path in list((target / 'jobs').glob('*.cancel')):
+                path.unlink(missing_ok=True)
+                actions.append(f"unlink:{path.name}")
+            try:
+                (target / 'control' / 'cancel').unlink(missing_ok=True)
+                actions.append('unlink:control/cancel')
+            except NotADirectoryError:
+                pass
+    except (OSError, ValueError) as exc:
+        return {
+            'ok': False,
+            'code': 'INTERNAL',
+            'message': f'Reset failed while clearing jobs: {exc}',
+            'before': before,
+            'after': inspect_control_plane(target),
+            'actions': actions,
+            'hard': hard,
+            'browserStopRequested': False,
+        }
+    cleared = clear_stale_hitl_markers(target)
+    actions.extend(f'clear_hitl:{p}' for p in cleared)
+    after = inspect_control_plane(target)
+    return {
+        'ok': not after.get('busy'),
+        'code': 'OK' if not after.get('busy') else 'RUN_BUSY',
+        'message': ('Reset complete' if not after.get('busy')
+                    else 'Reset requested but a run is still active'),
+        'before': before,
+        'after': after,
+        'actions': actions,
+        'hard': hard,
+        'browserStopRequested': bool(hard),
+    }
 
 
 def cancel_active(run_id: str | None = None, *, home=None) -> dict:

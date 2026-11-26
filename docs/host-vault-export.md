@@ -22,9 +22,9 @@
   "exportedAt": "2026-11-09T08:00:00Z",
   "systems": [
     {
-      "id": "ehr",
-      "name": "EHR系统",
-      "url": "https://cleanpro.example/login",
+      "id": "my-app",
+      "name": "演示系统",
+      "url": "https://example.com/login",
       "username": "alice",
       "password": "…本机明文，仅本地 drop…"
     }
@@ -60,6 +60,6 @@
 **Cursor**  
 可用 `$WEBCLAW_HOME/host-exports/cursor.json`；或项目私有脚本从系统凭据管理器灌入后 drop 该文件。
 
-## 与「登录EHR系统」菜谱
+## 与「登录{保险箱站点名}」菜谱
 
-菜谱只写别名；执行时 lite 查 vault。模型可用 `webclaw_accounts_list`（无密码）确认是否已配置。
+菜谱只写与保险箱一致的站点名（无内置 EHR/MES/OA 别名）；执行时 lite 查 vault。模型可用 `webclaw_accounts_list`（无密码）确认是否已配置。

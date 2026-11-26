@@ -5,7 +5,6 @@ Linux-only advisory publish locks; no dependency on MCP or Rust at import time.
 from __future__ import annotations
 import argparse
 import difflib
-import fcntl
 import hashlib
 import json
 import os
@@ -17,6 +16,12 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
+
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None  # type: ignore
+    import msvcrt
 
 _NAME = re.compile(r'[\w][\w.-]{0,79}\Z', re.UNICODE)
 _PARAM = re.compile(r'[\w][\w.-]{0,79}\Z', re.UNICODE)
@@ -107,10 +112,29 @@ class RecipeLibrary:
     def _lock(self, name):
         series = self._path(_name(name))
         series.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd = os.open(series/'.publish.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        flags = os.O_CREAT | os.O_RDWR
+        if hasattr(os, 'O_NOFOLLOW'):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(series/'.publish.lock', flags, 0o600)
         with os.fdopen(fd, 'a+') as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            yield series
+            if fcntl is not None:
+                fcntl.flock(f, fcntl.LOCK_EX)
+                try:
+                    yield series
+                finally:
+                    fcntl.flock(f, fcntl.LOCK_UN)
+            else:
+                f.seek(0)
+                if f.read(1) == '':
+                    f.write('0')
+                    f.flush()
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    yield series
+                finally:
+                    f.seek(0)
+                    msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
 
     def _versions(self, name):
         directory = self._path(_name(name), 'versions')

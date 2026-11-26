@@ -1,3 +1,4 @@
+pub mod captcha_ocr;
 pub mod excel_compat;
 pub mod http_json;
 pub mod local_ocr;
@@ -338,7 +339,9 @@ fn feishu_push_ai_blocking(run_dir: &Path, question: &str) -> Result<(), String>
     })?;
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
     let file_name = format!("AI分析-{stamp}.md");
-    let _ = session.save_text_document(&file_name, &report, None);
+    if let Ok(art) = session.save_text_document(&file_name, &report, None) {
+        let _ = session.mark_artifact_for_library(&art, "ai-analyze-rhai");
+    }
     let answer = answer.trim();
     if answer.is_empty() {
         return Err("AI 未生成可推送的回答".into());

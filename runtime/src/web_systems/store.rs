@@ -130,7 +130,8 @@ fn load_db() -> Result<WebSystemDb, String> {
 /// 旧版客户端内置的个人测试系统（分发版不得再带默认账号密码）
 const LEGACY_SEEDED_SYSTEM_IDS: &[&str] = &["ehr", "oa", "mes", "old-mes"];
 
-/// 伙伴空间常用系统：名称与登录地址已知，账号密码由用户提供。
+/// Optional built-in name→URL slots. OSS ships **none** — sites come only from
+/// the local vault / private DSH `config.systems` (`accounts ensure`).
 #[derive(Debug, Clone, Copy)]
 pub struct KnownLoginSystem {
     pub id: &'static str,
@@ -139,38 +140,25 @@ pub struct KnownLoginSystem {
 }
 
 pub fn known_login_catalog() -> &'static [KnownLoginSystem] {
-    // OSS: name/id slots only. Real login URLs belong in private DSH overlays
-    // (`config.systems` → `accounts ensure`), not in this public catalog.
-    &[
-        KnownLoginSystem {
-            id: "ehr",
-            name: "EHR系统",
-            url: "https://example.com/",
-        },
-        KnownLoginSystem {
-            id: "old-mes",
-            name: "旧MES系统",
-            url: "https://example.com/",
-        },
-        KnownLoginSystem {
-            id: "oa",
-            name: "OA系统",
-            url: "https://example.com/",
-        },
-    ]
+    &[]
 }
 
 pub fn lookup_known_login(query: &str) -> Option<KnownLoginSystem> {
-    let q = query.trim().to_lowercase();
-    let q = q.trim_end_matches("系统").trim();
+    let q = query.trim();
+    if q.is_empty() {
+        return None;
+    }
+    let q_lower = q.to_lowercase();
+    let q_stripped = q_lower.trim_end_matches("系统").trim();
     known_login_catalog().iter().copied().find(|k| {
-        k.id.eq_ignore_ascii_case(query.trim())
-            || k.name.eq_ignore_ascii_case(query.trim())
-            || k.name.trim_end_matches("系统").eq_ignore_ascii_case(q)
-            || k.id.replace('-', "").eq_ignore_ascii_case(&q.replace(['-', '_', ' '], ""))
-            || (q.contains("mes") && k.id == "old-mes")
-            || (q.contains("ehr") && k.id == "ehr")
-            || (q == "oa" && k.id == "oa")
+        k.id.eq_ignore_ascii_case(q)
+            || k.name.eq_ignore_ascii_case(q)
+            || k.name
+                .trim_end_matches("系统")
+                .eq_ignore_ascii_case(q_stripped)
+            || k.id
+                .replace('-', "")
+                .eq_ignore_ascii_case(&q_stripped.replace(['-', '_', ' '], ""))
     })
 }
 
@@ -250,7 +238,7 @@ pub fn upsert_worker_account(
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .or_else(|| known.map(|k| k.id.to_string()))
-        .ok_or_else(|| "请指定系统，如 --id ehr 或 --name EHR系统".to_string())?;
+        .ok_or_else(|| "请指定系统，如 --id my-app 或 --name 站点名".to_string())?;
     let system_name = name
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -303,7 +291,7 @@ pub fn ensure_worker_system_entry(
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .or_else(|| known.map(|k| k.id.to_string()))
-        .ok_or_else(|| "请指定系统，如 --id ehr 或 --name EHR系统".to_string())?;
+        .ok_or_else(|| "请指定系统，如 --id my-app 或 --name 站点名".to_string())?;
     let system_id = normalize_local_id(&system_id)?;
     let system_name = name
         .map(str::trim)
@@ -710,11 +698,11 @@ fn prefer_local_systems<'a>(matches: Vec<&'a WebSystem>) -> Vec<&'a WebSystem> {
     }
 }
 
-/// 根据名称/标识模糊匹配网站系统（大小写不敏感），如「EHR系统」「ehr」「OA」
+/// 根据名称/标识模糊匹配网站系统（大小写不敏感；名称须与保险箱条目一致）
 pub fn find_web_system_by_query(query: &str) -> Result<WebSystem, String> {
     let q = query.trim();
     if q.is_empty() {
-        return Err("请指定要登录的系统，如：登录EHR系统".into());
+        return Err("请指定要登录的系统（须与保险箱站点名一致），如：登录演示系统".into());
     }
     let q_lower = q.to_lowercase();
     let systems = all_systems_for_substitute()?;
@@ -994,8 +982,8 @@ mod tests {
     #[test]
     fn login_url_appends_login_path() {
         let sys = WebSystem {
-            id: "ehr".into(),
-            name: "EHR".into(),
+            id: "portal".into(),
+            name: "门户".into(),
             kind: WebSystemKind::Internal,
             url: "https://ehr.example.com/".into(),
             username: String::new(),
@@ -1012,8 +1000,8 @@ mod tests {
     #[test]
     fn login_url_keeps_oa_index() {
         let sys = WebSystem {
-            id: "oa".into(),
-            name: "OA".into(),
+            id: "office".into(),
+            name: "办公".into(),
             kind: WebSystemKind::Internal,
             url: "https://example.com/index.html".into(),
             username: String::new(),
@@ -1030,8 +1018,8 @@ mod tests {
     #[test]
     fn login_url_keeps_hash_spa() {
         let sys = WebSystem {
-            id: "old-mes".into(),
-            name: "旧MES".into(),
+            id: "spa-app".into(),
+            name: "演示SPA".into(),
             kind: WebSystemKind::Internal,
             url: "https://example.com/#/".into(),
             username: String::new(),
@@ -1046,11 +1034,12 @@ mod tests {
     }
 
     #[test]
-    fn lookup_known_ehr_and_old_mes() {
-        assert_eq!(lookup_known_login("EHR系统").unwrap().id, "ehr");
-        assert_eq!(lookup_known_login("ehr").unwrap().id, "ehr");
-        assert_eq!(lookup_known_login("旧MES系统").unwrap().id, "old-mes");
-        assert_eq!(lookup_known_login("旧MES").unwrap().id, "old-mes");
+    fn oss_known_login_catalog_is_empty() {
+        assert!(known_login_catalog().is_empty());
+        assert!(lookup_known_login("EHR系统").is_none());
+        assert!(lookup_known_login("旧MES").is_none());
+        assert!(lookup_known_login("oa").is_none());
+        assert!(lookup_known_login("mes").is_none());
     }
 }
 

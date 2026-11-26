@@ -19,7 +19,7 @@ pub(crate) fn emit_logs_public<R: tauri::Runtime>(app: &tauri::AppHandle<R>, sta
 }
 
 async fn ensure_chrome(state: &AppState, app: &tauri::AppHandle) -> Result<(), String> {
-    let msg = chrome::ensure_debug_chrome_ready(&state.chrome_child, false).await?;
+    let msg = chrome::ensure_debug_chrome_ready(&state.chrome_child, false, None).await?;
     state.push_log(&msg);
     emit_logs(app, state);
     Ok(())
@@ -47,7 +47,7 @@ async fn launch_debug_chrome(
     state.push_log("正在启动 Debug Chrome…");
     emit_logs(&app, &state);
 
-    let msg = chrome::ensure_debug_chrome_ready(&state.chrome_child, false).await?;
+    let msg = chrome::ensure_debug_chrome_ready(&state.chrome_child, false, None).await?;
     state.push_log(&msg);
     state.push_log(format!(
         "配置目录 {} | 快捷指令目录 {}",
@@ -1295,6 +1295,7 @@ fn get_app_paths() -> Result<serde_json::Value, String> {
         "app_data": paths::app_data_dir().to_string_lossy(),
         "ocr_models": paths::ocr_models_dir().to_string_lossy(),
         "classify_models": paths::classify_models_dir().to_string_lossy(),
+        "captcha_models": paths::captcha_models_dir().to_string_lossy(),
         "wechat_img_cache": paths::wechat_img_cache_dir().to_string_lossy(),
         "recipes_file": paths::recipes_file().to_string_lossy(),
         "commands_file": paths::commands_file().to_string_lossy(),
@@ -1314,11 +1315,12 @@ fn local_cache_status_cmd() -> Result<serde_json::Value, String> {
     serde_json::to_value(status).map_err(|e| e.to_string())
 }
 
-/// 打开系统模型缓存目录（含 ocr-models / classify-models）
+/// 打开系统模型缓存目录（含 ocr-models / classify-models / captcha-models）
 #[tauri::command]
 fn local_cache_open_system_dir_cmd() -> Result<(), String> {
     let _ = paths::ocr_models_dir();
     let _ = paths::classify_models_dir();
+    let _ = paths::captcha_models_dir();
     let dir = paths::app_root_dir();
     let _ = std::fs::create_dir_all(&dir);
     open_path_in_shell(&dir)
@@ -1976,7 +1978,7 @@ fn captcha_cancel_cmd(state: State<'_, AppState>, prompt_id: String) -> Result<(
 #[tauri::command]
 async fn show_browser_cmd(state: State<'_, AppState>) -> Result<String, String> {
     // 确保调试 Chrome 在跑；用户点「显示浏览器」时可能刚重启过浏览器
-    let _ = chrome::ensure_debug_chrome_ready(&state.chrome_child, false).await?;
+    let _ = chrome::ensure_debug_chrome_ready(&state.chrome_child, false, None).await?;
     let preferred = state.last_main_target.lock().clone();
     let session = browser_session::resolve_browser_session(
         &state.active_browser,

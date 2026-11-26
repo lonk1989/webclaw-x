@@ -120,6 +120,10 @@ pub fn friendly_failure_message(tip: &str, reason: &str) -> String {
 
 pub fn looks_like_credential_error(text: &str) -> bool {
     let t = text.to_lowercase();
+    // Captcha-specific tips are not credential failures (avoid mis-routing HITL).
+    if looks_like_captcha_error(&t) {
+        return false;
+    }
     const KEYS: &[&str] = &[
         "密码错误",
         "密码不正确",
@@ -149,6 +153,25 @@ pub fn looks_like_credential_error(text: &str) -> bool {
         "authentication failed",
         "login failed",
         "bad credentials",
+    ];
+    KEYS.iter().any(|k| t.contains(&k.to_lowercase()))
+}
+
+/// Page tip points at captcha, not account/password.
+pub fn looks_like_captcha_error(text: &str) -> bool {
+    let t = text.to_lowercase();
+    const KEYS: &[&str] = &[
+        "验证码错误",
+        "验证码不正确",
+        "验证码有误",
+        "验证码失效",
+        "验证码过期",
+        "验证码已过期",
+        "请输入验证码",
+        "校验码错误",
+        "captcha",
+        "verification code",
+        "verify code",
     ];
     KEYS.iter().any(|k| t.contains(&k.to_lowercase()))
 }
@@ -375,6 +398,8 @@ mod tests {
         assert!(looks_like_credential_error("密码不正确"));
         assert!(looks_like_credential_error("Invalid credentials"));
         assert!(!looks_like_credential_error("网络超时"));
+        assert!(!looks_like_credential_error("验证码错误"));
+        assert!(looks_like_captcha_error("验证码不正确"));
     }
 
     #[test]

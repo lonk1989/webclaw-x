@@ -119,7 +119,8 @@ impl CollectScope {
     }
 }
 
-/// 解析「采集」参数。空 = 全部；支持：表格、标题、按钮、链接、输入框、其它文字（可并列：采集表格、按钮）
+/// 解析「采集」参数。空 = 全部；支持：表格、标题、按钮、链接、输入框、其它文字（可并列：采集表格、按钮）。
+/// Agent 常写的「页面主要内容 / 内容 / content」等模糊说法按「全部」处理，避免无意义硬失败。
 pub fn parse_collect_args(args: &str) -> Result<CollectScope, String> {
     let raw = args.trim();
     if raw.is_empty() {
@@ -152,7 +153,7 @@ pub fn parse_collect_args(args: &str) -> Result<CollectScope, String> {
             Some("others") => scope.others = true,
             _ => {
                 return Err(format!(
-                    "「采集」分类无法识别：「{t}」。可用：表格、标题、按钮、链接、输入框、其它文字。无参数则采集全部。"
+                    "「采集」分类无法识别：「{t}」。可用：表格、标题、按钮、链接、输入框、其它文字。无参数或「内容/页面主要内容」则采集全部。"
                 ));
             }
         }
@@ -173,7 +174,32 @@ fn normalize_collect_kind(t: &str) -> Option<&'static str> {
         "链接" | "可点文字" | "link" | "links" => Some("links"),
         "输入框" | "输入" | "input" | "inputs" => Some("inputs"),
         "其它" | "其它文字" | "其他" | "其他文字" | "other" | "others" => Some("others"),
-        _ => None,
+        // Agent 常发明的「整页」说法 → 全部
+        "内容" | "主要内容" | "页面内容" | "页面主要内容" | "正文" | "全文" | "页面"
+        | "content" | "main" | "main content" | "maincontent" | "page content"
+        | "pagecontent" | "body" => Some("all"),
+        _ => {
+            let compact: String = s.chars().filter(|c| !c.is_whitespace() && *c != '-' && *c != '_').collect();
+            if matches!(
+                compact.as_str(),
+                "内容"
+                    | "主要内容"
+                    | "页面内容"
+                    | "页面主要内容"
+                    | "正文"
+                    | "全文"
+                    | "content"
+                    | "main"
+                    | "maincontent"
+                    | "pagecontent"
+                    | "body"
+            ) || compact.contains("主要内容")
+            {
+                Some("all")
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -1848,6 +1874,10 @@ mod tests {
         let s = parse_collect_args("表格、按钮").unwrap();
         assert!(s.tables && s.buttons && !s.links);
         assert!(parse_collect_args("乱七八糟").is_err());
+        // Agent 模糊词按全部处理，避免「采集页面主要内容」硬失败
+        assert!(parse_collect_args("页面主要内容").unwrap().is_all());
+        assert!(parse_collect_args("内容").unwrap().is_all());
+        assert!(parse_collect_args("main content").unwrap().is_all());
     }
 
     #[test]
